@@ -33,17 +33,23 @@ func main() {
 	for i := 0; i < 100; i++ {
 		// Sequential pattern: 10->20->30->40->10...
 		item := pattern[i%len(pattern)]
-		s.Append(tenantA, sentry.EventAccess, sentry.AccessPayload{ItemID: item})
+		if _, err := s.Append(tenantA, sentry.EventAccess, sentry.AccessPayload{ItemID: item}); err != nil {
+			panic(err)
+		}
 
 		// Noise for Tenant B
 		if i%5 == 0 {
-			s.Append(tenantB, sentry.EventAccess, sentry.AccessPayload{ItemID: uint64(i * 1000)})
+			if _, err := s.Append(tenantB, sentry.EventAccess, sentry.AccessPayload{ItemID: uint64(i * 1000)}); err != nil {
+				panic(err)
+			}
 		}
 	}
 
 	// 3. Simulate Crash/Restart
 	fmt.Println("[*] Simulating crash/restart...")
-	s.Close()
+	if err := s.Close(); err != nil {
+		panic(err)
+	}
 
 	s2, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
 	if err != nil {

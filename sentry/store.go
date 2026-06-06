@@ -23,14 +23,15 @@ type location struct {
 }
 
 type Store struct {
-	dir     string
-	opt     Options
-	mu      sync.Mutex
-	cur     *os.File
-	curSeg  uint32
-	curOff  int64
-	nextSeq Seq
-	keydir  []location
+	dir      string
+	opt      Options
+	mu       sync.RWMutex
+	cur      *os.File
+	curSeg   uint32
+	curOff   int64
+	nextSeq  Seq
+	keydir   []location
+	lastSync time.Time
 }
 
 type Options struct {
@@ -59,11 +60,6 @@ func Open(dir string, opt Options) (*Store, error) {
 	if err := s.openSegment(s.curSeg); err != nil {
 		return nil, err
 	}
-	off, err := s.cur.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
-	s.curOff = off
 
 	return s, nil
 }
@@ -110,6 +106,21 @@ func (s *Store) recover() error {
 			}
 
 			_, _, _, _, payloadLen, expectedCRC := DecodeHeader(header)
+			maxPayload := uint32(s.opt.SegmentMax - int64(HeaderSize))
+			if maxPayload > 16<<20 {
+				maxPayload = 16 << 20
+			}
+			if payloadLen > maxPayload {
+				if i == len(segs)-1 {
+					f.Close()
+					if err := os.Truncate(path, off); err != nil {
+						return err
+					}
+					break
+				}
+				f.Close()
+				return fmt.Errorf("%w at segment %d, offset %d: payload length %d exceeds limit", ErrCorrupt, seg, off, payloadLen)
+			}
 			payload := make([]byte, payloadLen)
 			if _, err := io.ReadFull(f, payload); err != nil {
 				if i == len(segs)-1 {
@@ -150,6 +161,7 @@ func (s *Store) recover() error {
 
 func (s *Store) openSegment(seg uint32) error {
 	if s.cur != nil {
+		s.cur.Sync()
 		s.cur.Close()
 	}
 	path := filepath.Join(s.dir, fmt.Sprintf("%06d.log", seg))
@@ -157,8 +169,14 @@ func (s *Store) openSegment(seg uint32) error {
 	if err != nil {
 		return err
 	}
+	off, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		f.Close()
+		return err
+	}
 	s.cur = f
 	s.curSeg = seg
+	s.curOff = off
 	return nil
 }
 
@@ -185,7 +203,6 @@ func (s *Store) Append(tenant TenantID, t EventType, payload any) (Seq, error) {
 		if err := s.openSegment(s.curSeg + 1); err != nil {
 			return 0, err
 		}
-		s.curOff = 0
 	}
 
 	if _, err := s.cur.Write(b); err != nil {
@@ -196,6 +213,12 @@ func (s *Store) Append(tenant TenantID, t EventType, payload any) (Seq, error) {
 		if err := s.cur.Sync(); err != nil {
 			return 0, err
 		}
+		s.lastSync = time.Now()
+	} else if time.Since(s.lastSync) >= s.opt.FsyncEvery {
+		if err := s.cur.Sync(); err != nil {
+			return 0, err
+		}
+		s.lastSync = time.Now()
 	}
 
 	s.keydir = append(s.keydir, location{seg: s.curSeg, off: s.curOff, size: uint32(len(b))})
@@ -207,10 +230,13 @@ func (s *Store) Append(tenant TenantID, t EventType, payload any) (Seq, error) {
 }
 
 func (s *Store) Read(seq Seq) (Record, error) {
-	if seq == 0 || int(seq) > len(s.keydir) {
+	s.mu.RLock()
+	if seq == 0 || seq > Seq(len(s.keydir)) {
+		s.mu.RUnlock()
 		return Record{}, fmt.Errorf("seq %d not found", seq)
 	}
 	loc := s.keydir[seq-1]
+	s.mu.RUnlock()
 
 	path := filepath.Join(s.dir, fmt.Sprintf("%06d.log", loc.seg))
 	f, err := os.Open(path)
@@ -254,7 +280,10 @@ type Filter struct {
 }
 
 func (s *Store) Scan(filter Filter, fn func(Record) bool) error {
-	for i := range s.keydir {
+	s.mu.RLock()
+	n := len(s.keydir)
+	s.mu.RUnlock()
+	for i := 0; i < n; i++ {
 		rec, err := s.Read(Seq(i + 1))
 		if err != nil {
 			return err
