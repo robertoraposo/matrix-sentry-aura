@@ -1,0 +1,21 @@
+# Compiled binaries / build artifacts (regenerable from cmd/)
+/ivfdiag
+/ivfindex
+/ivfrefine
+/ivfsweep
+/ivfpredict
+/sift1m
+/sentrydemo
+*.exe
+*.test
+*.out
+
+# Local datasets & generated indices (downloaded/built, not vendored)
+/data/
+*.fvecs
+*.ivecs
+*.gob
+
+# OS / editor
+.DS_Store
+*.swp

@@ -1,0 +1,17 @@
+== Matrix Sentry · PQ on SIFT10K (real data, independent ground truth) ==
+base=10000  learn=25000  query=100  dim=128  gt/query=100
+
+pipeline check: brute-force top-1 == INRIA ground truth on 100/100 queries
+
+train (M=8 K=256, 25000 learn vecs, 20 iters): 19.48s
+encode 10000 base vecs -> 8-byte codes: 330ms
+
+recall1@1   : 0.5100      inter@1   : 0.5100      (PQ 120µs/q vs exact 1.176ms/q)
+recall1@10  : 0.8700      inter@10  : 0.5500      (PQ 125µs/q vs exact 1.179ms/q)
+recall1@100 : 0.9900      inter@100 : 0.6764      (PQ 164µs/q vs exact 1.212ms/q)
+
+memory: raw float32 5.12 MB -> PQ codes 0.080 MB  (64x compression)
+
+Reference (published FAISS / Jégou et al., PQ M=8 K=256 ADC):
+  SIFT1M: recall@1 ~0.22, recall@10 ~0.60, recall@100 ~0.92
+  SIFT10K runs higher (fewer distractors among 10k vs 1M base).
