@@ -7,6 +7,8 @@ import (
 
 type Report struct {
 	Total       int
+	Scanned     int
+	Skipped     int
 	Lift        float64
 	MarkovHit   float64
 	MarginalHit float64
@@ -16,13 +18,17 @@ type Report struct {
 // Analyze measures the predictability of an access stream from a specific tenant.
 func Analyze(s *sentry.Store, tenant sentry.TenantID) (Report, error) {
 	var items []int
+	var scanned, skipped int
 	tenantCopy := tenant
 	etype := sentry.EventAccess
 	err := s.Scan(sentry.Filter{Tenant: &tenantCopy, Type: &etype}, func(r sentry.Record) bool {
+		scanned++
 		var p sentry.AccessPayload
-		if err := sentry.UnmarshalPayload(r.Payload, &p); err == nil {
-			items = append(items, int(p.ItemID))
+		if err := sentry.UnmarshalPayload(r.Payload, &p); err != nil {
+			skipped++
+			return true
 		}
+		items = append(items, int(p.ItemID))
 		return true
 	})
 	if err != nil {
@@ -30,7 +36,7 @@ func Analyze(s *sentry.Store, tenant sentry.TenantID) (Report, error) {
 	}
 
 	if len(items) < 2 {
-		return Report{Total: len(items)}, nil
+		return Report{Total: len(items), Scanned: scanned, Skipped: skipped}, nil
 	}
 
 	m := refine.NewMarkov()
@@ -76,6 +82,8 @@ func Analyze(s *sentry.Store, tenant sentry.TenantID) (Report, error) {
 
 	r := Report{
 		Total:       len(items),
+		Scanned:     scanned,
+		Skipped:     skipped,
 		MarkovHit:   float64(markovHits) / float64(predictableSteps),
 		MarginalHit: float64(marginalHits) / float64(len(items)-1),
 		Coverage:    float64(predictableSteps) / float64(len(items)-1),
