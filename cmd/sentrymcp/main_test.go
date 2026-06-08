@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"matrixsentry/mokoblinks"
 	"matrixsentry/sentry"
@@ -86,6 +90,36 @@ func TestRecordAccessBatch(t *testing.T) {
 	}
 	if items[0].ItemID != 1 || items[1].ItemID != 2 || items[2].ItemID != 1 {
 		t.Errorf("expected ids 1,2,1; got %d,%d,%d", items[0].ItemID, items[1].ItemID, items[2].ItemID)
+	}
+}
+
+// In HTTP mode the MokoBlinks mirror must flush after each tool call — otherwise
+// low-volume telemetry sits in the batch buffer (batchSize 50) and never ships,
+// so the live log explorer looks empty even though the journal is recording.
+func TestHTTPHandlerFlushesMokoBlinks(t *testing.T) {
+	got := make(chan string, 4)
+	ingest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got <- string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ingest.Close()
+	t.Setenv("MOKOBLINKS_URL", ingest.URL)
+	t.Setenv("MOKOBLINKS_API_KEY", "test")
+
+	s := newTestServer(t) // newTestServer builds moko via FromEnv, now enabled
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"record_access","arguments":{"path":"/x/a.go","src":"Read"}}}`
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	s.handleHTTP(httptest.NewRecorder(), req)
+
+	select {
+	case line := <-got:
+		if !strings.Contains(line, "record_access") {
+			t.Errorf("MokoBlinks received a line without record_access: %q", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("MokoBlinks never received the record_access log (HTTP handler did not flush)")
 	}
 }
 

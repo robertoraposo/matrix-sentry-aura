@@ -58,6 +58,7 @@ type server struct {
 	reg    *sentry.Registry // path→id dictionary for real (file-path) accesses
 	moko   *mokoblinks.Client
 	tenant sentry.TenantID
+	token  string // optional bearer auth for HTTP transport
 }
 
 func main() {
@@ -116,44 +117,50 @@ func (s *server) serveStdio() {
 }
 
 func (s *server) serveHTTP(addr string) {
-	token := os.Getenv("SENTRY_MCP_TOKEN") // optional bearer auth
+	s.token = os.Getenv("SENTRY_MCP_TOKEN") // optional bearer auth
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/" {
-			fmt.Fprintln(w, "matrix-sentry mcp ok")
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "use POST /mcp", http.StatusMethodNotAllowed)
-			return
-		}
-		if token != "" && r.Header.Get("Authorization") != "Bearer "+token {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-		if err != nil {
-			http.Error(w, "read error", http.StatusBadRequest)
-			return
-		}
-		resp, ok := s.dispatch(body)
-		if !ok {
-			w.WriteHeader(http.StatusAccepted) // notification: no response body
-			return
-		}
-		if resp.ID != nil && resp.Result != nil {
-			// Streamable HTTP: hand the client a session id on initialize.
-			if mInit(body) {
-				w.Header().Set("Mcp-Session-Id", fmt.Sprintf("ms-%d", time.Now().UnixNano()))
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	})
+	mux.HandleFunc("/", s.handleHTTP)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "sentrymcp http: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	// Ship any buffered MokoBlinks lines after every request so the live log
+	// mirror stays current under low volume (batch flush alone would not fire).
+	defer func() { go s.moko.Flush() }()
+
+	if r.Method == http.MethodGet && r.URL.Path == "/" {
+		fmt.Fprintln(w, "matrix-sentry mcp ok")
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "use POST /mcp", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.token != "" && r.Header.Get("Authorization") != "Bearer "+s.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	resp, ok := s.dispatch(body)
+	if !ok {
+		w.WriteHeader(http.StatusAccepted) // notification: no response body
+		return
+	}
+	if resp.ID != nil && resp.Result != nil {
+		// Streamable HTTP: hand the client a session id on initialize.
+		if mInit(body) {
+			w.Header().Set("Mcp-Session-Id", fmt.Sprintf("ms-%d", time.Now().UnixNano()))
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func mInit(body []byte) bool {
