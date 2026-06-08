@@ -1,68 +1,132 @@
-# Matrix Sentry · Handoff a Claude Code
+# Matrix Sentry · Handoff
 
-Estado del motor PQ (Product Quantization, Go puro, cero deps, cero Postgres).
-Validado en SIFT10K: recall1@1=0.50 / @10=0.87 / @100=0.99, 64x compresion,
-~10x mas rapido que exacto, pipeline check 100/100 contra ground truth INRIA.
-Train/EncodeBatch/SearchBatch paralelos y deterministas (mismo resultado a
-cualquier numero de cores: verificado GOMAXPROCS=1 vs 8).
+> Read this first, then check the auto-loaded memory index (MEMORY.md is loaded
+> every session) for the R&D details. This doc is the **operational + product
+> state**; the memory files hold the verified R&D results.
 
-## Estructura
+**What it is:** operational memory for code agents — a from-scratch pure-Go vector
++ memory engine (zero deps, zero Postgres) that stops AI coding agents from having
+amnesia. **Thesis:** *Access-Driven Rate-Distortion Indexing* — replace FAISS's
+uniform `w_i=1` with a weight read off the agent's logged access process; the moat
+is the access log itself.
 
-```
-go.mod                 module matrixsentry (go 1.24)
-pq/kmeans.go           k-means + k-means++ incremental
-pq/pq.go               PQ: New/Train/Encode/EncodeBatch/Search/SearchBatch/Save/Load
-cmd/sift1m/main.go     PRUEBA REAL escala-agnostica (SIFT1M o siftsmall via flags)
-cmd/sift/main.go       variante fija SIFT10K
-cmd/pqdemo/main.go     demo sintetico (ilustrativo, NO prueba)
-scripts/get_sift1m.sh  descarga SIFT1M
-```
+- **Owner:** Alvin Nuñez (AlvinTLC). Comms: Spanish; code/docs: English.
+- **Repo:** `github.com/AlvinTLC/matrix-sentry` (**PRIVATE**), default branch `main`.
+- **Boundary:** Matrix Sentry = agent decision/change memory. MokoBlinks = runtime
+  logs/observability (we USE it to debug the engine — that's allowed; don't mix the memory layers).
 
-## Arranque en tu homelab (Escenario A)
+---
 
-```bash
-go version            # necesita 1.24+
-go build ./...        # debe compilar limpio
-./scripts/get_sift1m.sh /data/sift
-go build -o sift1m ./cmd/sift1m
-./sift1m -dir /data/sift -prefix sift -m 8 -k 256 -iter 25
-```
+## Current state (as of this handoff)
 
-Objetivo: caer cerca del baseline FAISS/Jegou (recall1@1~0.22, @10~0.60,
-@100~0.92). Si si, el motor reproduce FAISS sobre 1M vectores.
+### Engine (verified on SIFT1M, CPU-only) — `pq/`, `ivf/`
+- `pq/` FROZEN PQ core: reproduces FAISS baseline (recall1@100≈0.92, 64×).
+- `ivf/` production **CA-IVFADC**: Config/New/Train/Add/Search/Recall/Save/Load,
+  content-addressed `Handle{Hash,Cell,Code}`, exact dedup, gob persistence.
+  Build-time fix 4.4× (9m35s→2m11s). Load 538ms. Auto-deduped 14,538 SIFT vecs.
+- R&D (`internal/{lab,refine}` + `cmd/{ivfdiag,ivfrefine,ivfsweep,ivfpredict}`):
+  - **access-gated refinement**: ~3–7× more byte-efficient than blind (18-cell sweep, vs random control).
+  - **Mechanism D (predictive/Markov)**: beats marginal up to +0.08 recall@10 at tight budgets; η=0 sanity passes.
+  - Full details + numbers in memory files: `access-gated-refinement.md`, `access-driven-rd-indexing.md`, `ca-ivfadc-error-budget.md`.
+- **Scenario B** (`cmd/sembed`, merged PR #4): engine validated on REAL 768-d Ollama
+  embeddings (nomic-embed-text): flat PQ recall1@100=1.000 at 32×. Needs Ollama to run.
 
-Flags utiles: -m 16 (mas recall, 16B/vector) | -train 50000 (entrenar mas
-rapido) | -check 100 (queries a verificar contra ground truth).
+### Product layer — `sentry/`, `sentry/access/`, `mokoblinks/`, `cmd/sentrymcp/`
+- **SentryLog Event Log** (built by Devin per our spec, PR #1; Qodo-fixed PRs #2/#3): append-only
+  journal + keydir + crash recovery + per-tenant isolation. Reviewed by us: sound, spec-faithful.
+  Spec: `docs/superpowers/specs/2026-06-05-sentrylog-event-log.md`.
+  - `sentry/record.go` 27-byte framed record (crc32|seq|tstamp|type|tenant|len|JSON payload).
+  - `sentry/store.go` Open/Append/Read/Scan/Close. `sentry/access/analyze.go` = the convergence
+    instrument: measures `lift = Markov − marginal` next-access hit-rate (the SAME Markov as Mechanism D).
+  - `cmd/sentrydemo` proves it end-to-end (append→crash→recover→analyze, lift detected, tenant isolation).
+- **`mokoblinks/`** (NEW, this session, TDD'd): pure-Go fire-and-forget client for the MokoBlinks
+  log platform (`POST /v1/ingest`). Env-driven, no-op without keys, never panics.
+- **`cmd/sentrymcp/`**: minimal pure-Go MCP server, two transports — stdio (local) and
+  **Streamable HTTP** (`-http :PORT`, remote). Tools: `record_access`, `analyze_access`, `stats`.
+  Every call → journal + MokoBlinks. Optional bearer auth via `SENTRY_MCP_TOKEN`.
+  `record_access` now accepts `item` (int, synthetic), `path` (string) or `paths` ([]string, batch)
+  plus `src` (originating tool); path(s) go through the registry below.
+- **Path registry** (`sentry/registry.go`, NEW): maps file paths → stable **sequential** item ids
+  per tenant. First sight of a path writes an `EventPathMap{id,path}` record (schema v2:
+  `EventType EventPathMap=2`), so the **journal is the single source of truth** for the dictionary;
+  `NewRegistry` rebuilds the map on `Open` by scanning. `AccessPayload` gained `Source` (back-compat).
+- **`cmd/sentry-record/`** (NEW, this session): the **PostToolUse hook** (the convergence payoff).
+  Pure-Go, reads the hook JSON on stdin, extracts the *existing regular files* a tool touched
+  (Read/Edit/Write/MultiEdit/NotebookEdit via file_path; Grep/Glob via response; Bash via command
+  tokens — all gated by `os.Stat`), and batch-POSTs them to `record_access` with `src`=tool.
+  Fire-and-forget, no-op without `SENTRY_MCP_URL`, never blocks/breaks the tool use. Config from env
+  or `~/.matrix-sentry.env`.
 
-## Siguiente: Escenario B (tus embeddings reales)
+### Live deployment (the bridge for Claude Code)
+- **MCP server running on the homelab VM** as systemd service `sentrymcp` (Restart=always,
+  survives reboot), listening `0.0.0.0:8808`, journal at `/root/sentry-journal`, tenant 1.
+- **Endpoint:** `http://10.10.10.96:8808/mcp` (reachable across Alvin's whole network).
+- **Auth token** + **MokoBlinks key** live in `/root/sentrymcp.env` on the VM (chmod 600, NOT in git).
+  The MCP token is also in the Mac's `~/.claude.json` (retrieve via `claude mcp get matrix-sentry`).
+- **Claude Code is registered** (user scope): `matrix-sentry: ✓ Connected`. Tools appear in NEW sessions.
+- MokoBlinks verified reporting with the matrix key (`app: matrix-sentry`, `{"status":"ok"}`).
 
-Prueba sobre TU distribucion, no SIFT. Lo que falta construir (prompt para
-Claude Code abajo):
+### Infrastructure
+- **Homelab VM:** `ssh matrix-sentry` → root@10.10.10.96 (8 cores/14 GiB, has SIFT1M at /data/sift). Hosts the live MCP server.
+- **Tesla box:** `ssh tesla` → alvintlc@100.93.11.62 (24c/31GiB, NVIDIA A2 GPU; for LOPQ/Ollama). No SIFT yet.
+- Compile-on-Mac → ship-binary (`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`). Both VMs lack a Go toolchain.
 
-1. Cliente Ollama (endpoint Tesla A2) -> embeddings de tus docs.
-   Modelo: nomic-embed-text (768d) con prefijos `search_document:` /
-   `search_query:`.  O mxbai-embed-large (1024d).
-2. Chunker (512 tokens, overlap 64) sobre corpus tecnico (NO configs de
-   clientes; mantener todo en tu Tailscale).
-3. Harness: embeber -> PQ.Train/Encode -> ground truth exacto por fuerza bruta
-   -> recall1@R e inter@R.  Reusa pq/ tal cual; D=768 -> usar M=96 o M=48.
+---
 
-## Prompt sugerido para Claude Code
+## Done this session
+1. ✅ **Live journal reset** — `/root/sentry-journal` is pristine (0 events) on the redeployed server.
+2. ✅ **sentrymcp redeployed** to the VM with schema v2 (`item`/`path`/`paths`/`src` + path registry).
+   Verified live: `record_access {paths}` assigns sequential ids; `tools/list` shows the new args.
+3. ✅ **PostToolUse hook built + wired** (`cmd/sentry-record`, full TDD). Binary at
+   `~/.local/bin/sentry-record`, secrets at `~/.matrix-sentry.env` (chmod 600), hook registered
+   **global** in `~/.claude/settings.json` (matcher Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash,
+   `async`). End-to-end verified: helper → HTTP → registry → journal → analyze.
 
-> Tengo el paquete matrixsentry (PQ en Go puro, package pq/). Construye
-> cmd/embed-eval que: (a) lea .md/.txt de un dir, los chunke a 512 tokens con
-> overlap 64, (b) embeba cada chunk via Ollama en {ENDPOINT} con
-> nomic-embed-text usando prefijo search_document:, (c) entrene pq.New(768, 96,
-> 256) sobre los embeddings, los encode, (d) tome N queries reales (prefijo
-> search_query:), calcule ground truth por fuerza bruta (cosine sobre float32) y
-> reporte recall1@{1,10,100} e inter@{1,100} del PQ contra ese ground truth.
-> No normalices si usas dot; si usas cosine, normaliza antes de PQ y brute force
-> de forma consistente. Reusa el package pq sin modificarlo.
+## Pending / next steps (Alvin's queue)
+1. **Activate the hook in the running session** — the settings watcher does not hot-load hooks added
+   mid-session. Open `/hooks` once (reloads config) or restart Claude Code. Then natural work streams
+   real access into tenant 1; run `analyze_access` for the **REAL η** (validate Mechanism D on real data).
+2. **Commit + push** the product layer (this session's branch) — `mokoblinks/`, `cmd/sentrymcp/`,
+   `cmd/sentry-record/`, `sentry/registry.go`, `sentry/record.go`, tests (no secrets).
+3. Then: SentryLog roadmap (object-store/CAS, dedup index `task.check`, more MCP tools, `memory.recall`),
+   and Mechanism B (co-access topology — the undelivered novel dark horse).
 
-## Notas de diseno ya decididas
+## Operational notes
+- VM service: `systemctl {status,restart} sentrymcp`; binary `/root/sentrymcp` (prev `/root/sentrymcp.old`),
+  env `/root/sentrymcp.env`, journal `/root/sentry-journal`. Reset = stop, `rm *.log`, start.
+- MCP endpoint `http://10.10.10.96:8808/mcp`; token via `claude mcp get matrix-sentry`.
+- Hook scope is global (every project → tenant 1, the honest "agent's working life" stream). The
+  `Source` tag on each access lets `analyze_access` be segmented by tool later (e.g. Read-only lift).
 
-- MVP Matrix Sentry = Event Log + Diff Store + ADR + dedup exacto (hash, sin
-  bloom) + namespacing por tenant (RLS). PQ es la capa semantica, se activa
-  cuando float32 plano no alcance (~>1M vectores).
-- Frontera: Matrix Sentry = memoria de decisiones/cambios del agente;
-  MokoBlinks = logs de runtime. No mezclar.
+## How to test the bridge right now
+New Claude Code session on any project → ask it to use `record_access` while working, then
+`analyze_access` → watch MokoBlinks Log Explorer (`app: matrix-sentry`) live.
+
+## Key decisions / constraints
+- Pure Go, zero external deps (Ollama is the only allowed external, for embeddings). JSON payload (not CBOR) for v1.
+- Determinism: same result regardless of core count (engine property; verified).
+- Multi-tenant day one. Single-user/append-only by nature.
+- Verify everything on real data; adversarially re-check before believing (3 review workflows this
+  session caught 2 metric bugs + 1 statistical confound — that rigor IS the product).
+
+---
+
+## RESUME PROMPT (paste into a fresh session)
+
+> Retomamos Matrix Sentry (motor de memoria para agentes, Go puro, repo privado
+> github.com/AlvinTLC/matrix-sentry). Lee HANDOFF.md y la memoria auto-cargada
+> (MEMORY.md) ANTES de actuar. Estado: el motor (pq/ivf/CA-IVFADC) y la I+D
+> (access-gated refinement, Mecánica D predictiva, tesis "access-driven RD
+> indexing") están validados; el SentryLog (sentry/) lo construyó Devin sobre
+> nuestra spec y lo revisamos (sólido); MokoBlinks (mokoblinks/) y el puente MCP
+> (cmd/sentrymcp, Streamable HTTP) están construidos y **desplegados vivos** en la
+> VM homelab como systemd `sentrymcp` en http://10.10.10.96:8808/mcp, con Claude
+> Code ya conectado (user scope). Secretos en /root/sentrymcp.env de la VM y el
+> token en ~/.claude.json (claude mcp get matrix-sentry). Pendientes: (1) resetear
+> el journal /root/sentry-journal, (2) commit+push de mokoblinks/ y cmd/sentrymcp/
+> (sin secretos), (3) construir el hook PostToolUse para capturar acceso REAL
+> automático y medir η real con analyze_access. Confirma que `go build ./... &&
+> go test ./...` está verde y que la VM sigue sirviendo (`ssh matrix-sentry
+> systemctl is-active sentrymcp`; `curl -s http://10.10.10.96:8808/`), y sigue por
+> el pendiente que te diga. Acceso VMs: `ssh matrix-sentry` (homelab, 10.10.10.96),
+> `ssh tesla` (100.93.11.62).
