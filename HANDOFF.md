@@ -109,12 +109,17 @@ Ran on tesla (Ollama nomic-embed-text, 768-d). `cmd/sembed -emit` wrote a 10k/1k
 ## Pending / next steps (Alvin's queue)
 1. **Merge PR #5** (`feat/posttooluse-access-hook`) — product layer + hook + calibration + installer +
    `sembed -emit`, all TDD'd & security-hardened.
-2. **NEXT BUILD = Mechanism F (anisotropic quantization: OPQ rotation / ScaNN-style)** — data-justified:
-   real embeddings need a sound anisotropic base quantizer BEFORE the access-driven thesis can be tested
-   fairly (F is prerequisite, not rival). The engine has no OPQ yet — this is a new mechanism (learned
-   rotation + retrain). Then re-test access-driven allocation on the sound base.
-3. **Fold Mechanism D into the production `ivf` package** (currently only in cmd/ivfpredict + internal/refine).
-4. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`); Mechanism B
+2. **Mechanism F BUILT this session** (`internal/aniso` + `cmd/anisotest`, PR #6 branch `feat/opq-rotation-probe`):
+   - Rotation/OPQ (stage 1) RULED OUT on real embeddings (random rotation ~neutral; subspaces already
+     balanced per ivfdiag METRIC 4).
+   - Anisotropic-loss PQ (ScaNN-style, parallel-error weighting) HELPS modestly: **M=16 h=2 → recall@10
+     +2.1pp** (0.633→0.654). First mechanism that helps on real data; symmetric (no ranking distortion).
+   - Modest though: bytes dominate (M16→M32 +18pp); F closes ~0.02 of the 0.27 gap-to-exact.
+   - Next on F: (a) seed-robustness re-run of the +2pp; (b) merge PR #6.
+3. **The open moat question**: access-driven allocation ON TOP of the F base WITHOUT the asymmetric
+   distance-scale distortion that killed refinement. This is the real frontier for the thesis on real data.
+4. **Fold Mechanism D into the production `ivf` package** (currently only in cmd/ivfpredict + internal/refine).
+5. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`); Mechanism B
    (co-access topology) deferred — NOT indicated by routing @10 on real data.
 
 ## Operational notes
