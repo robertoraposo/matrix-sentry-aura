@@ -155,6 +155,13 @@ func main() {
 		}
 		popPos := rankDesc(itemPop) // popPos[id] = 0-based popularity rank
 
+		// Realized predictability of THIS stream, measured by the same Markov-vs-
+		// marginal lift as the live access analyzer — so eta maps to a lift we can
+		// match against the η Claude actually exhibits.
+		sl := refine.StreamLift(aSeq)
+		fmt.Printf("eta=%.2f  stream lift=%.1f%% (markov %.1f%% / marginal %.1f%%, cov %.1f%%)\n",
+			eta, sl.Lift*100, sl.MarkovHit*100, sl.MarginalHit*100, sl.Coverage*100)
+
 		for _, frac := range parseFloats(*fracs) {
 			m := int(math.Round(frac * float64(N)))
 			reserve := int(math.Round(*predfrac * float64(m)))
