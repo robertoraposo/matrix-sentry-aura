@@ -11,7 +11,8 @@ type TenantID uint16
 type EventType uint8
 
 const (
-	EventAccess EventType = 1
+	EventAccess  EventType = 1
+	EventPathMap EventType = 2
 )
 
 type Record struct {
@@ -53,6 +54,14 @@ func DecodeHeader(b []byte) (seq Seq, tstamp int64, etype EventType, tenant Tena
 
 type AccessPayload struct {
 	ItemID uint64 `json:"item"`
+	Source string `json:"src,omitempty"` // originating tool (e.g. "Read", "Bash"); empty on legacy records
+}
+
+// PathMapPayload is the path→id dictionary entry, written the first time a path
+// is accessed so the journal is the single source of truth for the mapping.
+type PathMapPayload struct {
+	ID   uint64 `json:"id"`
+	Path string `json:"path"`
 }
 
 func MarshalPayload(v any) ([]byte, error) {

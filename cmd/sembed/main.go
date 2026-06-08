@@ -55,6 +55,7 @@ func main() {
 	maxBase := flag.Int("maxbase", 5000, "max base vectors (0 = all)")
 	maxQuery := flag.Int("maxquery", 500, "max query vectors (0 = all)")
 	corpusDir := flag.String("corpus", "", "directory with .txt files for corpus (default: <dir>/corpus)")
+	emit := flag.String("emit", "", "if set, also write <dir>/<emit>_{base,learn,query}.fvecs + <emit>_groundtruth.ivecs (SIFT layout) for ivfsweep/ivfpredict")
 	flag.Parse()
 
 	os.MkdirAll(*dir, 0755)
@@ -136,6 +137,19 @@ func main() {
 	t1 := time.Now()
 	gt := bruteForceKNN(queryVecs, baseVecs, 100)
 	fmt.Printf("  ground truth computed: %v  (top-100 for %d queries)\n", time.Since(t1).Round(time.Millisecond), nQuery)
+
+	// Emit the dataset in SIFT/TEXMEX layout so the access-driven harnesses
+	// (ivfsweep / ivfpredict) run on REAL embeddings unchanged. learn = base
+	// (single corpus: the coarse+PQ geometry trains on the base set itself).
+	if *emit != "" {
+		p := func(name string) string { return filepath.Join(*dir, *emit+"_"+name) }
+		writeFvecs(p("base.fvecs"), baseVecs)
+		writeFvecs(p("learn.fvecs"), baseVecs)
+		writeFvecs(p("query.fvecs"), queryVecs)
+		writeIvecs(p("groundtruth.ivecs"), gt)
+		fmt.Printf("[emit] wrote %s_{base,learn,query}.fvecs + %s_groundtruth.ivecs  (%d base, %d query, dim %d)\n",
+			*emit, *emit, nBase, nQuery, dim)
+	}
 
 	// Show a few semantic examples if texts available
 	if len(baseTexts) > 0 && len(queryTexts) > 0 {

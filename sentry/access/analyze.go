@@ -35,60 +35,17 @@ func Analyze(s *sentry.Store, tenant sentry.TenantID) (Report, error) {
 		return Report{}, err
 	}
 
-	if len(items) < 2 {
-		return Report{Total: len(items), Scanned: scanned, Skipped: skipped}, nil
-	}
-
-	m := refine.NewMarkov()
-	marginal := make(map[int]int)
-	var markovHits, marginalHits, predictableSteps int
-
-	for t := 1; t < len(items); t++ {
-		prev := items[t-1]
-		curr := items[t]
-
-		// 1. Predict (online causal: using only data before t)
-
-		// Markov prediction
-		markovPred := m.Predict(prev, 1)
-		if len(markovPred) > 0 {
-			predictableSteps++
-			if markovPred[0] == curr {
-				markovHits++
-			}
-		}
-
-		// Marginal prediction (popularity)
-		bestMarginal, maxCount := -1, -1
-		for id, count := range marginal {
-			if count > maxCount {
-				bestMarginal, maxCount = id, count
-			} else if count == maxCount && id < bestMarginal {
-				bestMarginal = id // deterministic tie-break
-			}
-		}
-		if bestMarginal == curr {
-			marginalHits++
-		}
-
-		// 2. Observe (learn for future steps)
-		m.Observe(prev, curr)
-		marginal[curr]++
-	}
-
-	if predictableSteps == 0 {
-		return Report{Total: len(items)}, nil
-	}
-
-	r := Report{
-		Total:       len(items),
+	// The Markov-vs-marginal lift computation is shared with the synthetic-stream
+	// calibration (refine.StreamLift), so the live η and the benchmark η are
+	// measured by the exact same code.
+	l := refine.StreamLift(items)
+	return Report{
+		Total:       l.Total,
 		Scanned:     scanned,
 		Skipped:     skipped,
-		MarkovHit:   float64(markovHits) / float64(predictableSteps),
-		MarginalHit: float64(marginalHits) / float64(len(items)-1),
-		Coverage:    float64(predictableSteps) / float64(len(items)-1),
-	}
-	r.Lift = r.MarkovHit - r.MarginalHit
-
-	return r, nil
+		Lift:        l.Lift,
+		MarkovHit:   l.MarkovHit,
+		MarginalHit: l.MarginalHit,
+		Coverage:    l.Coverage,
+	}, nil
 }
