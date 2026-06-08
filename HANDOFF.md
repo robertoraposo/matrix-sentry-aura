@@ -80,15 +80,32 @@ is the access log itself.
 3. ✅ **PostToolUse hook built + wired** (`cmd/sentry-record`, full TDD). Binary at
    `~/.local/bin/sentry-record`, secrets at `~/.matrix-sentry.env` (chmod 600), hook registered
    **global** in `~/.claude/settings.json` (matcher Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash,
-   `async`). End-to-end verified: helper → HTTP → registry → journal → analyze.
+   `async`). End-to-end verified: helper → HTTP → registry → journal → analyze. The hook auto-activated
+   mid-session; it is LIVE — natural work streams real access into tenant 1.
+4. ✅ **MokoBlinks flush fix** (`cmd/sentrymcp` handleHTTP) — HTTP mode never flushed; logs buffered
+   forever so the live mirror looked empty. Now `defer go s.moko.Flush()` per request. (The journal
+   was always correct — the journal and MokoBlinks are SEPARATE channels.)
+5. ✅ **Engine squeezed at the REAL η** (the "does it help Claude" proof). Live access measured
+   lift 10.3%→14.8% (climbs with volume). `cmd/streamlift`+`refine.StreamLift` calibrate eta→lift:
+   real η ≈ **eta 0.30–0.33**. Axis 1 (ivfpredict / Mechanism D): at that point **D−static = +0.021
+   recall@10** @frac0.002, eta=0 sanity perfect, headroom +0.096@eta0.9. Axis 2 (ivfsweep / access-gated):
+   **5.6–9.5× byte-efficiency** vs random at ESS=4028 (valid); ESS guardrail kills zipf=1.0. Both beat
+   FAISS-uniform at the real access pattern. Caveat: SIFT vectors still synthetic (only η real).
+6. ✅ **One-shot installer** for other machines: `cmd/distserve` (no-auth static server, systemd
+   `sentrydist` on VM :8810) + `cmd/distserve/install.sh`. `curl -fsSL http://10.10.10.96:8810/install.sh
+   | SENTRY_MCP_TOKEN=<tok> sh` does everything (arch-detect, sha256-pinned download, env, MCP, hook).
+   Token passed inline (never on the no-auth URL). Hardened per security review: allowlist + symlink
+   reject + sha256 pinning. All this session's work on branch `feat/posttooluse-access-hook` → **PR #5**.
 
 ## Pending / next steps (Alvin's queue)
-1. **Activate the hook in the running session** — the settings watcher does not hot-load hooks added
-   mid-session. Open `/hooks` once (reloads config) or restart Claude Code. Then natural work streams
-   real access into tenant 1; run `analyze_access` for the **REAL η** (validate Mechanism D on real data).
-2. **Commit + push** the product layer (this session's branch) — `mokoblinks/`, `cmd/sentrymcp/`,
-   `cmd/sentry-record/`, `sentry/registry.go`, `sentry/record.go`, tests (no secrets).
-3. Then: SentryLog roadmap (object-store/CAS, dedup index `task.check`, more MCP tools, `memory.recall`),
+1. **Merge PR #5** (`feat/posttooluse-access-hook`) when ready — it carries the whole product layer +
+   hook + calibration + installer, all TDD'd & security-hardened.
+2. **Real-embeddings value proof** (the full caveat-closer) — the tesla/Ollama track: embed a large
+   mixed corpus (768-d nomic-embed-text via `cmd/sembed`), run the access-weighted recall benchmark on
+   REAL semantic vectors (not just SIFT), driven by the real access stream. Closes "only η is real."
+3. **Fold Mechanism D into the production `ivf` package** (it currently lives only in the experiment
+   harnesses cmd/ivfpredict + internal/refine).
+4. Then: SentryLog roadmap (object-store/CAS, dedup index `task.check`, more MCP tools, `memory.recall`),
    and Mechanism B (co-access topology — the undelivered novel dark horse).
 
 ## Operational notes
