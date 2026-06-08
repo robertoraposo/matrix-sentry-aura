@@ -97,16 +97,25 @@ is the access log itself.
    Token passed inline (never on the no-auth URL). Hardened per security review: allowlist + symlink
    reject + sha256 pinning. All this session's work on branch `feat/posttooluse-access-hook` → **PR #5**.
 
+## Real-embeddings track — DONE this session, with a major finding
+Ran on tesla (Ollama nomic-embed-text, 768-d). `cmd/sembed -emit` wrote a 10k/1k real dataset
+(`/tmp/sembed/real_*`, still live). Results (see [[access-driven-rd-indexing]] memory for full detail):
+- **Access-gated refinement does NOT transfer from SIFT — it HURTS on real embeddings** (acc@10w < base
+  across m=8/16/32; ivfpredict D−static negative; oracle@10 < base). The SIFT +2pp was geometry-specific.
+- **nprobe check refuted "routing bottleneck"**: full-scan recall@10=0.64 ≈ nprobe16 → routing is fine @10.
+- **Real bottleneck = PQ quantization on ANISOTROPIC data** (flat-PQ@10=0.65 vs exact 0.91; ρ̄·D=207).
+- ivfdiag's "oracle@10=0.956" is within-cell-optimistic; trust the flat full-scan (0.646) as the ceiling.
+
 ## Pending / next steps (Alvin's queue)
-1. **Merge PR #5** (`feat/posttooluse-access-hook`) when ready — it carries the whole product layer +
-   hook + calibration + installer, all TDD'd & security-hardened.
-2. **Real-embeddings value proof** (the full caveat-closer) — the tesla/Ollama track: embed a large
-   mixed corpus (768-d nomic-embed-text via `cmd/sembed`), run the access-weighted recall benchmark on
-   REAL semantic vectors (not just SIFT), driven by the real access stream. Closes "only η is real."
-3. **Fold Mechanism D into the production `ivf` package** (it currently lives only in the experiment
-   harnesses cmd/ivfpredict + internal/refine).
-4. Then: SentryLog roadmap (object-store/CAS, dedup index `task.check`, more MCP tools, `memory.recall`),
-   and Mechanism B (co-access topology — the undelivered novel dark horse).
+1. **Merge PR #5** (`feat/posttooluse-access-hook`) — product layer + hook + calibration + installer +
+   `sembed -emit`, all TDD'd & security-hardened.
+2. **NEXT BUILD = Mechanism F (anisotropic quantization: OPQ rotation / ScaNN-style)** — data-justified:
+   real embeddings need a sound anisotropic base quantizer BEFORE the access-driven thesis can be tested
+   fairly (F is prerequisite, not rival). The engine has no OPQ yet — this is a new mechanism (learned
+   rotation + retrain). Then re-test access-driven allocation on the sound base.
+3. **Fold Mechanism D into the production `ivf` package** (currently only in cmd/ivfpredict + internal/refine).
+4. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`); Mechanism B
+   (co-access topology) deferred — NOT indicated by routing @10 on real data.
 
 ## Operational notes
 - VM service: `systemctl {status,restart} sentrymcp`; binary `/root/sentrymcp` (prev `/root/sentrymcp.old`),
