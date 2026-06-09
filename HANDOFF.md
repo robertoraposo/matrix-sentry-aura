@@ -106,21 +106,28 @@ Ran on tesla (Ollama nomic-embed-text, 768-d). `cmd/sembed -emit` wrote a 10k/1k
 - **Real bottleneck = PQ quantization on ANISOTROPIC data** (flat-PQ@10=0.65 vs exact 0.91; ρ̄·D=207).
 - ivfdiag's "oracle@10=0.956" is within-cell-optimistic; trust the flat full-scan (0.646) as the ceiling.
 
+## SCALE TEST settled the allocation thesis (47k real vectors, 27 books)
+`tesla:/tmp/sembed-big/big_*` (47,674 base / 5,000 query). Re-ran ivfsweep + anisotest (2 seeds) +
+ivfpredict at 5× scale — **scale CONFIRMS, does not change, the 10k verdict**: access-gated HURTS
+(acc<base<rnd), F-anisotropic is NEUTRAL (the 10k +2pp was seed noise: 2 seeds → −0.3/−0.04pp),
+Mechanism D HURTS (worse with predictability), oracle@10<base, bytes dominate.
+
+**FINAL VERDICT:** no per-item allocation / quantization-shape mechanism (access-driven OR general)
+gives a robust recall gain on real 768-d text embeddings at any scale. SIFT's +2pp/6× was
+geometry-specific and does NOT transfer. **The access log's value is OPERATIONAL/TEMPORAL (caching,
+prefetching — the live lift IS a cache hit-rate gain), NOT ALLOCATIONAL (bits per item).** See
+[[access-driven-rd-indexing]] for the full chain. Merged: PR #5, PR #6. Open branch
+`feat/scale-real-embeddings` (sembed glob + this HANDOFF).
+
 ## Pending / next steps (Alvin's queue)
-1. **Merge PR #5** (`feat/posttooluse-access-hook`) — product layer + hook + calibration + installer +
-   `sembed -emit`, all TDD'd & security-hardened.
-2. **Mechanism F BUILT this session** (`internal/aniso` + `cmd/anisotest`, PR #6 branch `feat/opq-rotation-probe`):
-   - Rotation/OPQ (stage 1) RULED OUT on real embeddings (random rotation ~neutral; subspaces already
-     balanced per ivfdiag METRIC 4).
-   - Anisotropic-loss PQ (ScaNN-style, parallel-error weighting) HELPS modestly: **M=16 h=2 → recall@10
-     +2.1pp** (0.633→0.654). First mechanism that helps on real data; symmetric (no ranking distortion).
-   - Modest though: bytes dominate (M16→M32 +18pp); F closes ~0.02 of the 0.27 gap-to-exact.
-   - Next on F: (a) seed-robustness re-run of the +2pp; (b) merge PR #6.
-3. **The open moat question**: access-driven allocation ON TOP of the F base WITHOUT the asymmetric
-   distance-scale distortion that killed refinement. This is the real frontier for the thesis on real data.
-4. **Fold Mechanism D into the production `ivf` package** (currently only in cmd/ivfpredict + internal/refine).
-5. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`); Mechanism B
-   (co-access topology) deferred — NOT indicated by routing @10 on real data.
+1. **Merge `feat/scale-real-embeddings`** (sembed `*.txt` glob + HANDOFF/scale verdict).
+2. **Operational reframe (the now-clear path for the moat)**: access-driven exact-tier caching +
+   Mechanism-D prefetching, measured by cache hit-rate / cost-per-query under the real access
+   distribution — where the proven lift (~19% live) directly pays off and there is NO ranking-distortion
+   problem. This, not RD bit-allocation, is where the access log delivers on real data.
+3. Durable assets stand: the live capture (hook + journal + analyze) and the Markov next-access predictor.
+4. Engine quantization on real text: just spend bytes (M) — no smart-allocation win to chase.
+5. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`).
 
 ## Operational notes
 - VM service: `systemctl {status,restart} sentrymcp`; binary `/root/sentrymcp` (prev `/root/sentrymcp.old`),

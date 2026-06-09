@@ -259,19 +259,13 @@ func main() {
 func buildCorpus(corpusDir string) []string {
 	var paragraphs []string
 
-	// First: load paragraphs from downloaded literature (Project Gutenberg books)
-	bookFiles := []string{
-		"pride.txt", "sherlock.txt", "frankenstein.txt",
-		"republic.txt", "origin.txt", "warandpeace.txt",
-	}
-	for _, fname := range bookFiles {
-		path := filepath.Join(corpusDir, fname)
-		if !fileExists(path) {
-			fmt.Printf("  [skip] %s not found\n", path)
-			continue
-		}
+	// First: load paragraphs from every .txt in the corpus dir (Project Gutenberg
+	// books etc.), in deterministic order so the dataset is reproducible.
+	matches, _ := filepath.Glob(filepath.Join(corpusDir, "*.txt"))
+	sort.Strings(matches)
+	for _, path := range matches {
 		paras := extractParagraphs(path, 50, 500)
-		fmt.Printf("  [book] %s: %d paragraphs\n", fname, len(paras))
+		fmt.Printf("  [book] %s: %d paragraphs\n", filepath.Base(path), len(paras))
 		paragraphs = append(paragraphs, paras...)
 	}
 
