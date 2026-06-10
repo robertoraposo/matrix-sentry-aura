@@ -4,6 +4,20 @@
 // uses the same next-access predictor whose lift we measured live — here that
 // lift becomes a concrete cache-hit-rate gain (no ranking-distortion problem).
 //
+// The cost model turns hit-rate into operational numbers under the REAL access
+// distribution: critical-path latency per access = h·Lhit + (1−h)·Lmiss (the
+// agent only waits on misses; prefetch happens off the critical path), and
+// fetch bandwidth = (misses + prefetch loads) per access — the traffic a
+// prefetching policy pays that a classical one does not.
+//
+// SCOPE (adversarial review, 2026-06-09): the journal stream is ID-ADDRESSED
+// (the agent re-accesses a known item id/path), so Lmiss is the cost of
+// FETCHING AN ITEM BY ID from storage (CAS/disk; default 200µs, deployment-
+// dependent) — NOT the ~ms full ANN search, which belongs to query-addressed
+// workloads where a hit cannot even be detected without searching. The
+// relative columns (saved%, xtra-band) are insensitive to the Lmiss scale
+// whenever Lmiss ≫ Lhit; only the absolute µs/access column depends on it.
+//
 //	go build -o cachesim ./cmd/cachesim
 //	./cachesim -dir /root/sentry-journal -tenant 1 -caps "4,8,16,32,64"
 package main
@@ -22,6 +36,8 @@ func main() {
 	dir := flag.String("dir", "/root/sentry-journal", "journal directory")
 	tenant := flag.Int("tenant", 1, "tenant id")
 	capsCSV := flag.String("caps", "4,8,16,32,64", "cache sizes to sweep")
+	lhitUS := flag.Float64("lhit-us", 0.3, "hit cost µs (resident-id lookup; cachebench-measured ~250ns)")
+	lmissUS := flag.Float64("lmiss-us", 200, "miss cost µs (ID-ADDRESSED storage fetch — deployment-dependent; NOT an ANN search)")
 	flag.Parse()
 
 	s, err := sentry.Open(*dir, sentry.Options{FsyncEvery: 0})
@@ -38,16 +54,32 @@ func main() {
 		return
 	}
 
-	fmt.Printf("%-8s %-10s %-10s %-16s %-12s\n", "cap", "LRU", "LFU", "Markov-prefetch", "MK-vs-best")
+	fmt.Printf("cost model: Lhit=%.1fµs Lmiss=%.0fµs (latency = h·Lhit + (1−h)·Lmiss; agent waits only on misses)\n\n", *lhitUS, *lmissUS)
+	fmt.Printf("%-8s %-7s | %-7s %-12s %-9s | %-10s %-10s\n",
+		"cap", "policy", "hit%", "µs/access", "saved", "fetch/acc", "xtra-band")
 	for _, c := range parseInts(*capsCSV) {
-		lru := cache.HitRate(cache.NewLRU(c), stream)
-		lfu := cache.HitRate(cache.NewLFU(c), stream)
-		mk := cache.HitRate(cache.NewMarkovPrefetch(c), stream)
-		best := lru
-		if lfu > best {
-			best = lfu
+		lru := cache.Replay(cache.NewLRU(c), stream)
+		lfu := cache.Replay(cache.NewLFU(c), stream)
+		mk := cache.Replay(cache.NewMarkovPrefetch(c), stream)
+
+		lat := func(st cache.Stats) float64 {
+			h := st.HitRatio()
+			return h**lhitUS + (1-h)**lmissUS
 		}
-		fmt.Printf("%-8d %-10.3f %-10.3f %-16.3f %+.3f\n", c, lru, lfu, mk, mk-best)
+		band := func(st cache.Stats) float64 {
+			return float64(st.Accesses-st.Hits+st.PrefetchLoads) / float64(st.Accesses)
+		}
+		lruLat := lat(lru)
+		for _, row := range []struct {
+			name string
+			st   cache.Stats
+		}{{"LRU", lru}, {"LFU", lfu}, {"MK", mk}} {
+			fmt.Printf("%-8d %-7s | %-7.3f %-12.0f %-9s | %-10.3f %-10s\n",
+				c, row.name, row.st.HitRatio(), lat(row.st),
+				fmt.Sprintf("%+.1f%%", (lruLat-lat(row.st))/lruLat*100),
+				band(row.st),
+				fmt.Sprintf("%+.1f%%", (band(row.st)-band(lru))/band(lru)*100))
+		}
 	}
 }
 

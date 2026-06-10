@@ -5,11 +5,60 @@
 // lift turns into a concrete cache-hit-rate gain.
 package cache
 
-import "matrixsentry/internal/refine"
+import (
+	"sort"
+
+	"matrixsentry/internal/refine"
+)
 
 // Cache consumes an access stream one item at a time, returning hit/miss.
 type Cache interface {
 	Access(item int) bool // true on hit
+}
+
+// Lister exposes a policy's current membership (sorted ascending) so an exact
+// tier can mirror it with real vectors.
+type Lister interface {
+	Items() []int
+}
+
+// Stats is the cost-relevant accounting of a stream replay. Hits avoid the
+// expensive miss path; Prefetches measure predictor activity; PrefetchLoads
+// are the prefetches that actually moved data (admitted a non-resident item) —
+// the bandwidth a prefetching policy pays that a classical one does not.
+type Stats struct {
+	Accesses      int
+	Hits          int
+	Prefetches    int
+	PrefetchLoads int
+}
+
+// HitRatio returns hits/accesses (0 for an empty replay).
+func (s Stats) HitRatio() float64 {
+	if s.Accesses == 0 {
+		return 0
+	}
+	return float64(s.Hits) / float64(s.Accesses)
+}
+
+// prefetchCounter is implemented by policies that issue speculative admissions.
+type prefetchCounter interface {
+	prefetchStats() (issued, loads int)
+}
+
+// Replay runs the whole stream through a fresh policy and returns the full
+// accounting (HitRate's richer sibling).
+func Replay(c Cache, stream []int) Stats {
+	st := Stats{Accesses: len(stream)}
+	for _, it := range stream {
+		if c.Access(it) {
+			st.Hits++
+		}
+	}
+	if p, ok := c.(prefetchCounter); ok {
+		st.Prefetches, st.PrefetchLoads = p.prefetchStats()
+	}
+	return st
 }
 
 // HitRate runs the whole stream through a fresh policy and returns hits/total.
@@ -70,6 +119,12 @@ func (c *lru) admit(item int) {
 	}
 }
 
+func (c *lru) Items() []int {
+	out := append([]int(nil), c.order...)
+	sort.Ints(out)
+	return out
+}
+
 // --- LFU (popularity) ---
 
 type lfu struct {
@@ -102,13 +157,24 @@ func (c *lfu) evict() {
 	delete(c.freq, minItem)
 }
 
+func (c *lfu) Items() []int {
+	out := make([]int, 0, len(c.freq))
+	for it := range c.freq {
+		out = append(out, it)
+	}
+	sort.Ints(out)
+	return out
+}
+
 // --- Markov prefetch (Mechanism D, operational) ---
 
 type markovPrefetch struct {
-	lru     *lru
-	mk      *refine.Markov
-	prev    int
-	started bool
+	lru           *lru
+	mk            *refine.Markov
+	prev          int
+	started       bool
+	prefetches    int // predictions issued
+	prefetchLoads int // predictions that admitted a non-resident item
 }
 
 // NewMarkovPrefetch is an LRU cache that, after each access, prefetches the item
@@ -124,7 +190,17 @@ func (c *markovPrefetch) Access(item int) bool {
 	}
 	c.prev, c.started = item, true
 	if pred := c.mk.Predict(item, 1); len(pred) > 0 {
+		c.prefetches++
+		if !c.lru.set[pred[0]] {
+			c.prefetchLoads++
+		}
 		c.lru.admit(pred[0]) // prefetch (does not count as a hit)
 	}
 	return hit
+}
+
+func (c *markovPrefetch) Items() []int { return c.lru.Items() }
+
+func (c *markovPrefetch) prefetchStats() (issued, loads int) {
+	return c.prefetches, c.prefetchLoads
 }

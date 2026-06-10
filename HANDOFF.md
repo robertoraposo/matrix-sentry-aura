@@ -132,15 +132,61 @@ Markov-prefetch reuses the `internal/refine` predictor as a PREFETCHER, no ranki
 - Run it: `ssh matrix-sentry 'cp /root/sentry-journal/*.log /tmp/snap/ && /root/cachesim -dir /tmp/snap'`
   (always snapshot the journal first — do NOT sentry.Open the live dir, its recovery could truncate it).
 
+## ✅ Exact tier + cost model BUILT — and the closed-loop check CORRECTED the claim (2026-06-09)
+The "next build" from the queue is done, with the session's defining result coming from the
+adversarial review, not the build:
+
+**Built (all TDD, all green):**
+- `internal/cache`: `Stats`/`Replay` (hits + prefetches ISSUED vs prefetch LOADS — only non-resident
+  admissions cost bandwidth), `Items()` membership on all policies, **`ExactTier`** (mirrors any policy's
+  membership with UNCOMPRESSED vectors; fetch-on-admit, drop-on-evict, counts fetch bandwidth).
+- `ivf.Index.SearchTiered(q, nprobe, topK, tier map[Hash]vec)` — **production wiring**: residents scored
+  with EXACT distances, dedup by Handle.Hash, candidates regardless of routing, gathers topK+|tier| deep
+  so demoted residents backfill (review fix). 5 unit tests incl. routing-miss immunity + backfill.
+- `cmd/cachebench` — the experiment harness on REAL embeddings (tesla big_*, 47k×768, Scenario-B config
+  nlist=64 M=96 nprobe=16): causal replay (search → then access), open/closed-loop modes, conditional
+  recall, frozen-tier global check, `-diag` failure decomposition, production-faithful bounded top-K
+  latency bench. `cmd/cachesim` extended with the cost model (latency = h·Lhit+(1−h)·Lmiss; bandwidth).
+
+**Result chain (each check corrected the previous belief — 26-agent adversarial review in the middle):**
+1. Open-loop (oracle stream): tier adds +0.2..+0.8pp stream recall@10, rec|hit 0.93. Looked good.
+2. `-diag`: rec|hit<1 is NOT near-dup crowding (0.6/10) — it's ADC UNDERESTIMATES (10/10 of displacing
+   items). Exact-scoring the resident can't fix distractor noise.
+3. Adversarial review (3 majors): (a) the 250ns-hit-vs-18.4ms-miss pairing mixed two workloads (id-addressed
+   hit vs query-search miss); (b) the stream was open-loop oracle (tier always fed the TRUE NN, even when
+   the engine missed it); (c) lab latency path ~1.3–1.5× slower than the production heap → Lmiss inflated.
+4. **Closed-loop re-run (the deployable protocol): the recall gain REVERSES.** Δstream NEGATIVE everywhere
+   (MK −0.3..−0.5pp at eta 0.3; −0.8..−1.1pp at eta 0.6; worse than LRU; 2 seeds consistent): caching what
+   the engine returns ENTRENCHES its errors — a wrong result, cached and exact-scored (no ADC inflation),
+   displaces true NNs of nearby future queries. Δall stays ≈0 (±0.0008): no global harm, damage is local
+   to the hot stream. **VERDICT: the exact tier is NOT a recall lever in deployment.**
+
+**What SURVIVES (the real operational value, quantified):**
+- **Id-addressed caching on the REAL journal stream** (closed-loop by construction — the journal IS what
+  the agent accessed): at n=2433 accesses / 604 files, MK beats LRU by +1.7..+3.5pp hit-rate, **−2.8..−5.6%
+  critical-path latency** at equal capacity, paying +16..+44% off-path fetch bandwidth (prefetch loads).
+  Scale: hit = resident-id lookup ~140–250ns; miss = storage fetch by id (~200µs default, deployment knob).
+  The saved% column is Lmiss-scale-invariant; only absolute µs depend on storage.
+- **Honest engine latency** (bounded top-K, single-thread, 47k×768 M=96 nprobe=16): full search 14.3ms/q;
+  tiered query overhead +2.7..+5.9%. (A QUERY cannot use the 140ns hit path — it can't know its answer's
+  id without searching. Never pair those numbers.)
+- `SearchTiered` is correct, tested, and globally safe (Δall≈0) — scoped to SERVING known items fast and
+  guaranteed-fresh, not to boosting search recall.
+
+**Next recall lever the data picked:** symmetric exact re-rank of the WHOLE shortlist with on-disk
+originals (DiskANN-style; the journal/CAS already wants the originals anyway) — fixes the ADC-underestimate
+failures the diag isolated, with no resident/non-resident asymmetry to exploit or entrench.
+
 ## Pending / next steps (Alvin's queue)
-1. **Merge `feat/operational-cache`** (cache sim + this HANDOFF).
-2. **Complete the operational value (the next build)**: add an **exact tier** (cached items stored
-   uncompressed → cache hits are recall-PERFECT, not just fast) and a **cost-per-query / latency** metric
-   under the real access distribution (not just hit-rate). Wire the cache into the engine search path.
-3. Grow real volume + (multi-agent) other Claude Code instances feeding the same tenant via the installer
+1. **Merge `feat/operational-cache`** (cache sim + exact tier + cachebench + corrected claims + this HANDOFF).
+2. **Symmetric shortlist re-rank with on-disk originals** (the data-picked recall lever; see above).
+   Estimate first: exact@10 ceiling for re-rank of top-200 at M=96 (cheap to measure in cachebench).
+3. Wire the id-addressed serving path end-to-end: registry item id → Handle.Hash adapter so
+   `cache.ExactTier` + `ivf.SearchTiered` serve `memory.recall`-by-path from RAM (the 140ns path).
+4. Grow real volume + (multi-agent) other Claude Code instances feeding the same tenant via the installer
    (`curl …:8810/install.sh | SENTRY_MCP_TOKEN=… sh`) → richer access, more robust numbers.
-4. Durable assets: live capture (hook+journal+analyze) + Markov predictor — now with a proven operational payoff.
-5. Closed on real text: RD bit-allocation (A/D/F) — just spend bytes (M); don't chase smart-allocation.
+5. Closed on real text: RD bit-allocation (A/D/F) — just spend bytes (M). NOW ALSO CLOSED: exact-tier
+   merge as a recall lever (closed-loop negative). Don't reopen either without new structure.
 6. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`).
 
 ## Operational notes
@@ -168,24 +214,28 @@ New Claude Code session on any project → ask it to use `record_access` while w
 > Retomamos Matrix Sentry (motor de memoria para agentes, Go puro, repo privado
 > github.com/AlvinTLC/matrix-sentry). Lee HANDOFF.md y la memoria auto-cargada
 > (MEMORY.md, sobre todo [[access-driven-rd-indexing]] y [[sentrylog-mcp-bridge]])
-> ANTES de actuar. ESTADO: el hook PostToolUse está VIVO capturando mi acceso real
-> a tenant 1 (journal ~1400+ eventos, ~340 archivos, coverage ~68%); el puente MCP
-> `sentrymcp` corre como systemd en http://10.10.10.96:8808/mcp. RESULTADO CLAVE de
-> la última sesión: la tesis de ASIGNACIÓN por acceso (refinamiento/Mecánica D como
-> bits-por-item, anisotrópico F) FUNCIONA en SIFT pero NO transfiere a embeddings
-> reales — verificado a escala (47k vectores, tesla); los bytes dominan. PERO el
-> reframe OPERACIONAL SÍ funciona: `internal/cache` + `cmd/cachesim` muestran que
-> Markov-prefetch (el MISMO predictor, ahora como prefetcher) le gana a LRU/LFU por
-> +2.8–4.0pp de hit-rate sobre mi stream de acceso REAL, y MEJORA cuanto más trabajo.
-> Branch `feat/operational-cache` commiteado (sin mergear). OBJETIVO de esta sesión:
-> seguir EXPRIMIENDO el valor operacional y medir cuánto ayuda de verdad a mis Claude
-> Code — siguiente build = TIER EXACTO (items cacheados sin comprimir → hits
-> recall-perfectos) + métrica de COSTO-por-query/latencia bajo la distribución de
-> acceso real, y cablear el caché al path de búsqueda. Empieza confirmando
-> `go build ./... && go test ./...` verde, la VM viva (`ssh matrix-sentry
-> systemctl is-active sentrymcp`; `curl -s http://10.10.10.96:8808/`), y re-corre
-> cachesim sobre un SNAPSHOT del journal vivo (NUNCA sentry.Open el dir vivo —
-> copia los .log primero) para ver el hit-rate actual. Acceso VMs: `ssh matrix-sentry`
-> (homelab 10.10.10.96, journal + cachesim), `ssh tesla` (100.93.11.62, Ollama +
-> dataset real en /tmp/sembed-big/big_*). El instalador one-shot para sumar más
-> agentes: `curl -fsSL http://10.10.10.96:8810/install.sh | SENTRY_MCP_TOKEN=<tok> sh`.
+> ANTES de actuar. ESTADO: hook PostToolUse VIVO (journal ~2400+ accesos, ~600
+> archivos); `sentrymcp` systemd en http://10.10.10.96:8808/mcp. RESULTADO CLAVE
+> última sesión: construimos el TIER EXACTO (cache.ExactTier + ivf.SearchTiered,
+> TDD, 5 tests) + modelo de costo + cachebench sobre embeddings reales (tesla,
+> 47k×768) — y la verificación adversarial (26 agentes) + el re-run CLOSED-LOOP
+> INVIRTIERON la conclusión de recall: cachear lo que el engine devuelve atrinchera
+> sus errores (Δstream −0.3..−1.1pp, peor con más prefetch); el gain open-loop era
+> artefacto del stream-oráculo. El tier exacto NO es palanca de recall en deployment
+> (Δall≈0, sin daño global; queda scoped a SERVIR items conocidos: hit id-addressed
+> ~140ns vs fetch ~200µs). LO QUE SÍ vive: el caché id-addressed sobre el journal
+> REAL — MK vs LRU +1.7..+3.5pp hit / −2.8..−5.6% latencia de camino crítico /
+> +16..44% bandwidth off-path (n=2433). Engine real: búsqueda 14.3ms/q single-thread
+> (M=96, 47k). Branch `feat/operational-cache` con todo commiteado (sin mergear).
+> SIGUIENTE PALANCA (elegida por los datos, diag: los fallos de recall son ADC
+> UNDERESTIMATES de distractores, no near-dups): re-rank EXACTO y SIMÉTRICO del
+> shortlist completo con originales en disco (estilo DiskANN — el CAS del roadmap
+> ya quiere los originales). Primero medir el techo: exact re-rank de top-200 en
+> cachebench (barato). Después: adapter registry-id→Handle.Hash para servir
+> memory.recall-by-path desde RAM. Empieza confirmando `go build ./... && go test
+> ./...` verde, VM viva (`ssh matrix-sentry systemctl is-active sentrymcp`), y
+> cachesim sobre SNAPSHOT del journal (NUNCA sentry.Open el dir vivo): ssh
+> matrix-sentry 'rm -rf /tmp/snap && mkdir /tmp/snap && cp /root/sentry-journal/*.log
+> /tmp/snap/ && /root/cachesim -dir /tmp/snap'. VMs: `ssh matrix-sentry` (journal),
+> `ssh tesla` (dataset /tmp/sembed-big/big_*, resultados /tmp/cache*.out). Verifica
+> adversarialmente antes de creer: esta sesión el closed-loop invirtió el resultado.

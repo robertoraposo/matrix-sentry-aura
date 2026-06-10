@@ -31,6 +31,87 @@ func TestLFUKeepsHot(t *testing.T) {
 	}
 }
 
+// Replay reports the full cost-relevant accounting, not just the hit ratio:
+// LRU cap 2 over [1,2,1,3,1] → m,m,h,m,h and no prefetch traffic.
+func TestReplayStatsLRU(t *testing.T) {
+	st := Replay(NewLRU(2), []int{1, 2, 1, 3, 1})
+	if st.Accesses != 5 || st.Hits != 2 || st.Prefetches != 0 {
+		t.Errorf("Replay = %+v, want Accesses=5 Hits=2 Prefetches=0", st)
+	}
+}
+
+// Markov-prefetch pays bandwidth only for NON-resident prefetch admissions.
+// Alternating stream [1,2,1,2,1,2] cap 2: 4 prefetches issued (t2..t5) but the
+// predicted item is always already resident → zero prefetch loads.
+func TestReplayStatsMarkovCountsPrefetches(t *testing.T) {
+	st := Replay(NewMarkovPrefetch(2), []int{1, 2, 1, 2, 1, 2})
+	if st.Accesses != 6 || st.Hits != 4 {
+		t.Errorf("Replay = %+v, want Accesses=6 Hits=4", st)
+	}
+	if st.Prefetches != 4 {
+		t.Errorf("Prefetches = %d, want 4 (one per step from the 3rd on)", st.Prefetches)
+	}
+	if st.PrefetchLoads != 0 {
+		t.Errorf("PrefetchLoads = %d, want 0 (predictions always resident)", st.PrefetchLoads)
+	}
+}
+
+// When the predicted item was evicted, the prefetch is real traffic.
+// Stream [1,2,1,2,3,1] cap 2: prefetches issued at t2,t3,t5; only t5's
+// (predict 2 after 1, but 2 was evicted by 3 at t4) loads a non-resident item.
+func TestReplayStatsMarkovPrefetchLoads(t *testing.T) {
+	st := Replay(NewMarkovPrefetch(2), []int{1, 2, 1, 2, 3, 1})
+	if st.Hits != 3 {
+		t.Errorf("Hits = %d, want 3 (t2,t3,t5)", st.Hits)
+	}
+	if st.Prefetches != 3 {
+		t.Errorf("Prefetches = %d, want 3 (issued at t2,t3,t5)", st.Prefetches)
+	}
+	if st.PrefetchLoads != 1 {
+		t.Errorf("PrefetchLoads = %d, want 1 (only t5 admits a non-resident item)", st.PrefetchLoads)
+	}
+}
+
+// Every policy exposes its current membership (sorted) so an exact tier can
+// mirror it with real vectors.
+func TestItemsMembership(t *testing.T) {
+	lru := NewLRU(2)
+	for _, it := range []int{1, 2, 3} {
+		lru.Access(it)
+	}
+	if got := lru.(Lister).Items(); !equalInts(got, []int{2, 3}) {
+		t.Errorf("LRU Items = %v, want [2 3]", got)
+	}
+
+	lfu := NewLFU(2)
+	for _, it := range []int{1, 1, 2, 3} {
+		lfu.Access(it)
+	}
+	if got := lfu.(Lister).Items(); !equalInts(got, []int{1, 3}) {
+		t.Errorf("LFU Items = %v, want [1 3]", got)
+	}
+
+	mk := NewMarkovPrefetch(2)
+	for _, it := range []int{1, 2, 1} {
+		mk.Access(it)
+	}
+	if got := mk.(Lister).Items(); !equalInts(got, []int{1, 2}) {
+		t.Errorf("Markov Items = %v, want [1 2]", got)
+	}
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // On a perfectly sequential stream with a cache too small for the working set,
 // Markov prefetch should beat LRU: it predicts the next item and pre-loads it.
 func TestMarkovPrefetchBeatsLRU(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 
 	"matrixsentry/pq"
@@ -195,6 +196,49 @@ func (ix *Index) Search(query []float32, nprobe, topK int) []Hit {
 		out[i] = Hit{Handle: ix.entries[r.ID], Dist: r.Dist}
 	}
 	return out
+}
+
+// SearchTiered is Search with an EXACT TIER: tier maps Handle.Hash to the
+// item's uncompressed vector (the access-driven cache keeps hot/predicted
+// items at full precision). Residents are scored with EXACT distances —
+// replacing their ADC estimate — and are candidates regardless of cell
+// routing, so a cache hit cannot be lost to a coarse-quantizer miss or PQ
+// distortion: hits are recall-perfect. Hashes not present in the index are
+// ignored (the tier mirrors indexed items). Results are re-ranked by distance
+// (ties to lower Hash) and truncated to topK; with an empty tier the result is
+// exactly Search.
+func (ix *Index) SearchTiered(query []float32, nprobe, topK int, tier map[uint64][]float32) []Hit {
+	if len(tier) == 0 {
+		return ix.Search(query, nprobe, topK)
+	}
+	// Gather topK+len(tier) ADC candidates: in the worst case every resident
+	// occupies a top-K slot and is demoted by its exact distance, and each
+	// vacated slot must backfill from the next ADC rank.
+	adc := ix.Search(query, nprobe, topK+len(tier))
+	merged := make([]Hit, 0, len(adc)+len(tier))
+	for _, h := range adc {
+		if _, ok := tier[h.Handle.Hash]; ok {
+			continue // replaced by its exact entry below
+		}
+		merged = append(merged, h)
+	}
+	for hash, vec := range tier {
+		pos, ok := ix.byHash[hash]
+		if !ok {
+			continue
+		}
+		merged = append(merged, Hit{Handle: ix.entries[pos], Dist: float32(sqL2(query, vec))})
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Dist != merged[j].Dist {
+			return merged[i].Dist < merged[j].Dist
+		}
+		return merged[i].Handle.Hash < merged[j].Handle.Hash
+	})
+	if len(merged) > topK {
+		merged = merged[:topK]
+	}
+	return merged
 }
 
 // Recall answers "do I already know something like this?" at resolution tol:
