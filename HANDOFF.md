@@ -119,15 +119,29 @@ prefetching — the live lift IS a cache hit-rate gain), NOT ALLOCATIONAL (bits 
 [[access-driven-rd-indexing]] for the full chain. Merged: PR #5, PR #6. Open branch
 `feat/scale-real-embeddings` (sembed glob + this HANDOFF).
 
+## ✅ Operational reframe VALIDATED (branch `feat/operational-cache`, committed, not yet merged)
+After the allocation thesis closed, the access log's value is OPERATIONAL. Built `internal/cache`
+(LRU / LFU / Markov-prefetch, TDD) + `cmd/cachesim` (replays the real journal access stream by hit-rate;
+Markov-prefetch reuses the `internal/refine` predictor as a PREFETCHER, no ranking-distortion problem).
+**Result on the LIVE agent stream — and it strengthens as the stream grows:**
+- n=286 accesses: Markov-prefetch beats best classical (LRU/LFU) by +1.4–3.1pp hit-rate (small caches).
+- n=1071 accesses (later same day): **+2.8–4.0pp** (peak +4.0 at cap=32); LFU useless (popularity dead,
+  marginal 1.4%); converges at large caches as prefetch theory predicts.
+- The SAME Mechanism D that HURT as a bit-allocator HELPS as a prefetcher — the application was wrong.
+- Live system is expanding fast: 1402 events / 1071 accesses / 337 distinct files / coverage 68.5%.
+- Run it: `ssh matrix-sentry 'cp /root/sentry-journal/*.log /tmp/snap/ && /root/cachesim -dir /tmp/snap'`
+  (always snapshot the journal first — do NOT sentry.Open the live dir, its recovery could truncate it).
+
 ## Pending / next steps (Alvin's queue)
-1. **Merge `feat/scale-real-embeddings`** (sembed `*.txt` glob + HANDOFF/scale verdict).
-2. **Operational reframe (the now-clear path for the moat)**: access-driven exact-tier caching +
-   Mechanism-D prefetching, measured by cache hit-rate / cost-per-query under the real access
-   distribution — where the proven lift (~19% live) directly pays off and there is NO ranking-distortion
-   problem. This, not RD bit-allocation, is where the access log delivers on real data.
-3. Durable assets stand: the live capture (hook + journal + analyze) and the Markov next-access predictor.
-4. Engine quantization on real text: just spend bytes (M) — no smart-allocation win to chase.
-5. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`).
+1. **Merge `feat/operational-cache`** (cache sim + this HANDOFF).
+2. **Complete the operational value (the next build)**: add an **exact tier** (cached items stored
+   uncompressed → cache hits are recall-PERFECT, not just fast) and a **cost-per-query / latency** metric
+   under the real access distribution (not just hit-rate). Wire the cache into the engine search path.
+3. Grow real volume + (multi-agent) other Claude Code instances feeding the same tenant via the installer
+   (`curl …:8810/install.sh | SENTRY_MCP_TOKEN=… sh`) → richer access, more robust numbers.
+4. Durable assets: live capture (hook+journal+analyze) + Markov predictor — now with a proven operational payoff.
+5. Closed on real text: RD bit-allocation (A/D/F) — just spend bytes (M); don't chase smart-allocation.
+6. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`).
 
 ## Operational notes
 - VM service: `systemctl {status,restart} sentrymcp`; binary `/root/sentrymcp` (prev `/root/sentrymcp.old`),
@@ -153,18 +167,25 @@ New Claude Code session on any project → ask it to use `record_access` while w
 
 > Retomamos Matrix Sentry (motor de memoria para agentes, Go puro, repo privado
 > github.com/AlvinTLC/matrix-sentry). Lee HANDOFF.md y la memoria auto-cargada
-> (MEMORY.md) ANTES de actuar. Estado: el motor (pq/ivf/CA-IVFADC) y la I+D
-> (access-gated refinement, Mecánica D predictiva, tesis "access-driven RD
-> indexing") están validados; el SentryLog (sentry/) lo construyó Devin sobre
-> nuestra spec y lo revisamos (sólido); MokoBlinks (mokoblinks/) y el puente MCP
-> (cmd/sentrymcp, Streamable HTTP) están construidos y **desplegados vivos** en la
-> VM homelab como systemd `sentrymcp` en http://10.10.10.96:8808/mcp, con Claude
-> Code ya conectado (user scope). Secretos en /root/sentrymcp.env de la VM y el
-> token en ~/.claude.json (claude mcp get matrix-sentry). Pendientes: (1) resetear
-> el journal /root/sentry-journal, (2) commit+push de mokoblinks/ y cmd/sentrymcp/
-> (sin secretos), (3) construir el hook PostToolUse para capturar acceso REAL
-> automático y medir η real con analyze_access. Confirma que `go build ./... &&
-> go test ./...` está verde y que la VM sigue sirviendo (`ssh matrix-sentry
-> systemctl is-active sentrymcp`; `curl -s http://10.10.10.96:8808/`), y sigue por
-> el pendiente que te diga. Acceso VMs: `ssh matrix-sentry` (homelab, 10.10.10.96),
-> `ssh tesla` (100.93.11.62).
+> (MEMORY.md, sobre todo [[access-driven-rd-indexing]] y [[sentrylog-mcp-bridge]])
+> ANTES de actuar. ESTADO: el hook PostToolUse está VIVO capturando mi acceso real
+> a tenant 1 (journal ~1400+ eventos, ~340 archivos, coverage ~68%); el puente MCP
+> `sentrymcp` corre como systemd en http://10.10.10.96:8808/mcp. RESULTADO CLAVE de
+> la última sesión: la tesis de ASIGNACIÓN por acceso (refinamiento/Mecánica D como
+> bits-por-item, anisotrópico F) FUNCIONA en SIFT pero NO transfiere a embeddings
+> reales — verificado a escala (47k vectores, tesla); los bytes dominan. PERO el
+> reframe OPERACIONAL SÍ funciona: `internal/cache` + `cmd/cachesim` muestran que
+> Markov-prefetch (el MISMO predictor, ahora como prefetcher) le gana a LRU/LFU por
+> +2.8–4.0pp de hit-rate sobre mi stream de acceso REAL, y MEJORA cuanto más trabajo.
+> Branch `feat/operational-cache` commiteado (sin mergear). OBJETIVO de esta sesión:
+> seguir EXPRIMIENDO el valor operacional y medir cuánto ayuda de verdad a mis Claude
+> Code — siguiente build = TIER EXACTO (items cacheados sin comprimir → hits
+> recall-perfectos) + métrica de COSTO-por-query/latencia bajo la distribución de
+> acceso real, y cablear el caché al path de búsqueda. Empieza confirmando
+> `go build ./... && go test ./...` verde, la VM viva (`ssh matrix-sentry
+> systemctl is-active sentrymcp`; `curl -s http://10.10.10.96:8808/`), y re-corre
+> cachesim sobre un SNAPSHOT del journal vivo (NUNCA sentry.Open el dir vivo —
+> copia los .log primero) para ver el hit-rate actual. Acceso VMs: `ssh matrix-sentry`
+> (homelab 10.10.10.96, journal + cachesim), `ssh tesla` (100.93.11.62, Ollama +
+> dataset real en /tmp/sembed-big/big_*). El instalador one-shot para sumar más
+> agentes: `curl -fsSL http://10.10.10.96:8810/install.sh | SENTRY_MCP_TOKEN=<tok> sh`.
