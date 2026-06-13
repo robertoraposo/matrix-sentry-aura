@@ -480,6 +480,7 @@ func envFloat(key string, def float64) float64 {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
 		}
+		fmt.Fprintf(os.Stderr, "sentrymcp: %s=%q: not a valid float, using default %v\n", key, v, def)
 	}
 	return def
 }

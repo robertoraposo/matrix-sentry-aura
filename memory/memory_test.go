@@ -240,3 +240,23 @@ func TestRememberNoDedupWhenThresholdZero(t *testing.T) {
 		t.Fatalf("count=%d want 2 (no dedup)", n)
 	}
 }
+
+func TestRememberDedupIsTenantScoped(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	st.DedupThreshold = 0.05
+	if _, _, err := st.Remember(2, "cat", nil, ""); err != nil { // tenant 2 stores "cat"
+		t.Fatal(err)
+	}
+	// tenant 1 stores "kitten" — near tenant 2's "cat" but a different tenant,
+	// so it must NOT be deduped across the tenant boundary.
+	_, dup, err := st.Remember(1, "kitten", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup {
+		t.Fatal("dedup fired across tenant boundary")
+	}
+	if n := st.Count(1); n != 1 {
+		t.Fatalf("tenant 1 count = %d, want 1", n)
+	}
+}

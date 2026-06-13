@@ -64,7 +64,8 @@ type Store struct {
 	entries []entry
 	nextID  uint64
 	// DedupThreshold is the squared-L2 novelty radius. If a new memory's
-	// nearest existing neighbor (same tenant) is closer than this, Remember
+	// nearest existing neighbor (same tenant) is strictly closer than this
+	// (distance < threshold; the boundary point is treated as novel), Remember
 	// treats it as a duplicate and does not persist it. 0 disables dedup.
 	DedupThreshold float32
 }
