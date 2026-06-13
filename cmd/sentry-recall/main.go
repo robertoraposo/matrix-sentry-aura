@@ -43,6 +43,136 @@ func queryFromCwd(cwd string) string {
 	return filepath.Base(cwd)
 }
 
+// maxQueryLen caps the recall query so a long README can't blow past the
+// embedder's input or dominate the request.
+const maxQueryLen = 500
+
+// buildQuery composes the recall query from the richest locally-available
+// signal: the git remote slug (identity) plus the README intro (semantics that
+// embed near the project's stored memories), with graceful fallbacks. It always
+// returns a usable string — the cwd basename is the last resort.
+func buildQuery(cwd string) string {
+	slug := gitSlug(cwd)
+	intro := readmeIntro(cwd)
+	var q string
+	switch {
+	case slug != "" && intro != "":
+		q = slug + ": " + intro
+	case slug != "":
+		q = slug
+	case intro != "":
+		q = intro
+	default:
+		q = queryFromCwd(cwd)
+	}
+	if len(q) > maxQueryLen {
+		q = q[:maxQueryLen]
+	}
+	return q
+}
+
+// gitSlug reads cwd/.git/config and returns the origin remote's "org/repo"
+// slug, or "" if there is no config, no origin url, or it can't be parsed. It
+// parses the file directly (no git binary) so the hook stays dependency-free.
+func gitSlug(cwd string) string {
+	data, err := os.ReadFile(filepath.Join(cwd, ".git", "config"))
+	if err != nil {
+		return ""
+	}
+	inOrigin := false
+	var url string
+	for _, ln := range strings.Split(string(data), "\n") {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "[") {
+			inOrigin = t == `[remote "origin"]`
+			continue
+		}
+		if inOrigin {
+			if k, v, ok := strings.Cut(t, "="); ok && strings.TrimSpace(k) == "url" {
+				url = strings.TrimSpace(v)
+				break
+			}
+		}
+	}
+	return slugFromURL(url)
+}
+
+// slugFromURL extracts "org/repo" from an https or ssh git remote url.
+func slugFromURL(url string) string {
+	if url == "" {
+		return ""
+	}
+	url = strings.TrimSuffix(url, ".git")
+	if strings.HasPrefix(url, "git@") { // ssh: git@host:org/repo
+		if i := strings.LastIndex(url, ":"); i >= 0 {
+			url = url[i+1:]
+		}
+	} else { // https://host/org/repo (tolerate a port on host)
+		if i := strings.Index(url, "://"); i >= 0 {
+			url = url[i+3:]
+		}
+		if i := strings.Index(url, "/"); i >= 0 {
+			url = url[i+1:] // drop host
+		}
+	}
+	parts := strings.Split(strings.Trim(url, "/"), "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+}
+
+// readmeIntro returns the first heading plus the first prose paragraph of a
+// README in cwd, cleaned to a single line, or "" if none is found.
+func readmeIntro(cwd string) string {
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		return ""
+	}
+	var path string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(strings.ToUpper(e.Name()), "README") {
+			path = filepath.Join(cwd, e.Name())
+			break
+		}
+	}
+	if path == "" {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, 1024))
+
+	clean := func(s string) string {
+		return strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(s), "#> "))
+	}
+	lines := strings.Split(string(b), "\n")
+	i := 0
+	for i < len(lines) && clean(lines[i]) == "" { // skip leading blanks
+		i++
+	}
+	var parts []string
+	if i < len(lines) { // heading
+		parts = append(parts, clean(lines[i]))
+		i++
+	}
+	for i < len(lines) && clean(lines[i]) == "" { // skip blanks before paragraph
+		i++
+	}
+	for i < len(lines) && clean(lines[i]) != "" { // first paragraph
+		parts = append(parts, clean(lines[i]))
+		i++
+	}
+	out := strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
+	if len(out) > maxQueryLen {
+		out = out[:maxQueryLen]
+	}
+	return out
+}
+
 // shouldInject injects on a fresh start or resume, but not on compact/clear
 // where the session already carries context.
 func shouldInject(source string) bool {
@@ -167,7 +297,7 @@ func main() {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	query := queryFromCwd(cwd)
+	query := buildQuery(cwd)
 	if query == "" {
 		return
 	}
