@@ -31,6 +31,10 @@ type MemoryPayload struct {
 	Vector []float32 `json:"vec"`
 	Tags   []string  `json:"tags,omitempty"`
 	Source string    `json:"src,omitempty"`
+	// Supersedes, when non-zero, is the id of an earlier memory this record
+	// replaces. On rebuild the superseded id is dropped from the in-RAM index;
+	// the original record remains on disk (append-only journal = full history).
+	Supersedes uint64 `json:"sup,omitempty"`
 }
 
 // Memory is a recall result: the stored item plus its distance to the query
@@ -92,6 +96,9 @@ func New(journal *sentry.Store, embed Embedder) (*Store, error) {
 		if p.ID >= s.nextID {
 			s.nextID = p.ID + 1
 		}
+		if p.Supersedes != 0 {
+			s.dropEntry(r.Tenant, p.Supersedes)
+		}
 		return true
 	})
 	if err != nil {
@@ -103,23 +110,51 @@ func New(journal *sentry.Store, embed Embedder) (*Store, error) {
 	return s, nil
 }
 
-// Remember embeds text and, unless it duplicates an existing memory, persists it
-// to the journal as an EventMemory and adds it to the in-RAM index. When dedup
-// is enabled (DedupThreshold > 0) and the nearest existing memory for tenant is
-// within that squared-L2 radius, the text is NOT persisted: the existing id is
-// returned with deduped=true. Otherwise the new id is returned with deduped=false.
-func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src string) (id uint64, deduped bool, err error) {
+// dropEntry removes the in-RAM entry for (tenant, id) if present. The journal
+// record is untouched — only the live index (current truth) drops the id.
+func (s *Store) dropEntry(tenant sentry.TenantID, id uint64) {
+	for i := range s.entries {
+		if s.entries[i].tenant == tenant && s.entries[i].mem.ID == id {
+			s.entries = append(s.entries[:i], s.entries[i+1:]...)
+			return
+		}
+	}
+}
+
+// Remember embeds text and persists it as an EventMemory, returning its id.
+//
+//   - supersedes == 0: normal path. If dedup is enabled (DedupThreshold > 0) and
+//     the nearest same-tenant memory is within that squared-L2 radius, the text
+//     is NOT persisted — the existing id is returned with deduped=true.
+//   - supersedes names an existing same-tenant memory: the dedup gate is bypassed,
+//     the new record carries a Supersedes pointer, the superseded id is dropped
+//     from the in-RAM index, and superseded is set to it. The journal keeps the
+//     old record (history on disk; current truth in the index).
+//   - supersedes names a missing or foreign id: it is ignored and the call falls
+//     back to the normal path (superseded stays 0) — never an error.
+func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src string, supersedes uint64) (id uint64, deduped bool, superseded uint64, err error) {
 	vecs, err := s.embed.Embed([]string{text})
 	if err != nil {
-		return 0, false, fmt.Errorf("memory: embed: %w", err)
+		return 0, false, 0, fmt.Errorf("memory: embed: %w", err)
 	}
 	if len(vecs) != 1 || len(vecs[0]) != s.embed.Dim() {
-		return 0, false, fmt.Errorf("memory: embedder returned %d vectors / bad dim", len(vecs))
+		return 0, false, 0, fmt.Errorf("memory: embedder returned %d vectors / bad dim", len(vecs))
 	}
 	v := vecs[0]
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if supersedes != 0 && s.hasEntry(tenant, supersedes) {
+		p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: tags, Source: src, Supersedes: supersedes}
+		if _, err := s.journal.Append(tenant, EventMemory, p); err != nil {
+			return 0, false, 0, fmt.Errorf("memory: append: %w", err)
+		}
+		s.dropEntry(tenant, supersedes)
+		s.entries = append(s.entries, entry{tenant: tenant, mem: p})
+		s.nextID++
+		return p.ID, false, supersedes, nil
+	}
 
 	if s.DedupThreshold > 0 {
 		var bestID uint64
@@ -135,17 +170,27 @@ func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src
 			}
 		}
 		if found && bestDist < s.DedupThreshold {
-			return bestID, true, nil
+			return bestID, true, 0, nil
 		}
 	}
 
 	p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: tags, Source: src}
 	if _, err := s.journal.Append(tenant, EventMemory, p); err != nil {
-		return 0, false, fmt.Errorf("memory: append: %w", err)
+		return 0, false, 0, fmt.Errorf("memory: append: %w", err)
 	}
 	s.entries = append(s.entries, entry{tenant: tenant, mem: p})
 	s.nextID++
-	return p.ID, false, nil
+	return p.ID, false, 0, nil
+}
+
+// hasEntry reports whether (tenant, id) is live in the index. Caller holds s.mu.
+func (s *Store) hasEntry(tenant sentry.TenantID, id uint64) bool {
+	for _, e := range s.entries {
+		if e.tenant == tenant && e.mem.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Recall embeds query and returns the k nearest memories for tenant, ascending
