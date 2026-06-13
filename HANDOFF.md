@@ -221,10 +221,30 @@ failures the diag isolated, with no resident/non-resident asymmetry to exploit o
   ~0.985 from lab.*; 0.1pp = noise). Proof the canonical config works in production code, not just the lab.
   Output: results/ivfverify-production-path.txt.
 
+## ✅ SEMANTIC MEMORY WIRED INTO THE MCP — remember/recall LIVE in production (2026-06-13)
+
+The MCP was access-telemetry only; now the actual product works end-to-end: an agent (Claude or any
+model) can store context and recall it by meaning across sessions.
+- **`memory/`** (new pkg, TDD 13 tests): `Store` = SentryLog journal + vector search. `Remember(text)`
+  embeds + persists `EventMemory{id,text,vector,tags}` (type 3) + indexes; `Recall(query)` embeds query →
+  nearest memories. Vectors persisted → reopen rebuilds WITHOUT re-embedding. Search is **exact L2**
+  (recall-perfect, sub-ms at agent memory volume; `ivf.Recommended`+`SearchRerank` drops in behind this
+  API at scale). `Embedder` interface + `OllamaEmbedder` (/api/embed).
+- **`cmd/sentrymcp`** (TDD +6 tests): new tools **`remember`** + **`recall`** in tools/list. Enabled by
+  `-ollama URL` / `SENTRY_OLLAMA_URL`; without it journal tools still work and memory tools say
+  "embeddings not configured" (no opaque failure). `-embed-model`/`-embed-dim` configurable.
+- **DEPLOYED + VERIFIED in production** (homelab VM systemd, http://10.10.10.96:8808/mcp): new binary
+  shipped (`/root/sentrymcp.bak` = prev), env added `SENTRY_OLLAMA_URL=http://100.93.11.62:11434`
+  (tesla's Ollama via tailscale — VM stays no-Ollama per strategy) + `SENTRY_EMBED_MODEL=nomic-embed-text-v2-moe`
+  (dim 768). Journal NOT reset (real hook accesses preserved; EventMemory doesn't collide). Verified:
+  tools/list shows all 5; remember stored memory #1; recall with a paraphrased query (no shared keywords)
+  returned it with tags. Restart-persistence verified on tesla (rebuild from journal, no re-embed).
+- **Single dependency:** production embeddings need tesla's Ollama reachable; if it's down remember/recall
+  error cleanly and the rest of the MCP keeps serving.
+
 ## Pending / next steps (Alvin's queue)
-1. **Wire `ivf.Recommended` + `SearchRerank` into the MCP serving path** when `memory.recall` lands — the
-   config is codified and verified; it just needs a service to call it (the originals fetch can be the
-   CAS/registry). Until then `ivf.Recommended(768)` IS the applied production config.
+1. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
+   corpus grows large enough to need it (API is unchanged; originals fetch = the persisted vectors/CAS).
 2. **Merge `feat/operational-cache`**, then `feat/evolve-tuner` (PR each).
 3. Wire the id-addressed serving path end-to-end: registry item id → Handle.Hash adapter so
    `cache.ExactTier` + `ivf.SearchTiered` serve `memory.recall`-by-path from RAM (the 140ns path).
