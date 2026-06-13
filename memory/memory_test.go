@@ -60,7 +60,7 @@ func geoEmbedder() *fakeEmbedder {
 func TestRecallReturnsNearestNeighborFirst(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
 	for _, text := range []string{"cat", "rocket", "feline"} {
-		if _, err := st.Remember(1, text, nil, ""); err != nil {
+		if _, _, err := st.Remember(1, text, nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -106,8 +106,8 @@ func TestRecallEmptyStoreIsEmptyNotError(t *testing.T) {
 
 func TestRememberAssignsSequentialIDs(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
-	a, _ := st.Remember(1, "cat", nil, "")
-	b, _ := st.Remember(1, "rocket", nil, "")
+	a, _, _ := st.Remember(1, "cat", nil, "")
+	b, _, _ := st.Remember(1, "rocket", nil, "")
 	if a == 0 || b != a+1 {
 		t.Fatalf("ids not sequential: %d then %d", a, b)
 	}
@@ -161,7 +161,7 @@ func TestRememberPersistsAcrossReopenWithoutReembedding(t *testing.T) {
 		t.Fatalf("tags not persisted: %+v", got[0].Tags)
 	}
 	// next id must continue after the rebuilt max
-	id, _ := st2.Remember(1, "feline", nil, "")
+	id, _, _ := st2.Remember(1, "feline", nil, "")
 	if id != 3 {
 		t.Fatalf("nextID after rebuild = %d, want 3", id)
 	}
@@ -192,3 +192,51 @@ func TestNewRejectsDimMismatchOnRebuild(t *testing.T) {
 }
 
 var _ = filepath.Join
+
+func TestRememberDedupsNearDuplicate(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	st.DedupThreshold = 0.05 // kitten(0.01) < tau < feline(0.25)
+
+	id1, dup1, err := st.Remember(1, "cat", nil, "")
+	if err != nil || dup1 {
+		t.Fatalf("first store: id=%d dup=%v err=%v", id1, dup1, err)
+	}
+	// "kitten" is within tau of "cat" -> deduped, not persisted, returns id1.
+	id2, dup2, err := st.Remember(1, "kitten", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dup2 {
+		t.Fatalf("near-duplicate not deduped")
+	}
+	if id2 != id1 {
+		t.Fatalf("dedup returned id %d, want existing %d", id2, id1)
+	}
+	if n := st.Count(1); n != 1 {
+		t.Fatalf("store grew to %d on a duplicate, want 1", n)
+	}
+	// "feline" is beyond tau -> genuinely new, persisted.
+	_, dup3, err := st.Remember(1, "feline", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup3 {
+		t.Fatalf("distinct fact wrongly deduped (tau false positive)")
+	}
+	if n := st.Count(1); n != 2 {
+		t.Fatalf("distinct fact not stored: count=%d want 2", n)
+	}
+}
+
+func TestRememberNoDedupWhenThresholdZero(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	// DedupThreshold defaults to 0 -> feature off, every call persists.
+	st.Remember(1, "cat", nil, "")
+	_, dup, _ := st.Remember(1, "cat", nil, "")
+	if dup {
+		t.Fatalf("dedup fired with threshold 0 (should be disabled)")
+	}
+	if n := st.Count(1); n != 2 {
+		t.Fatalf("count=%d want 2 (no dedup)", n)
+	}
+}

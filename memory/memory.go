@@ -63,6 +63,10 @@ type Store struct {
 	mu      sync.Mutex
 	entries []entry
 	nextID  uint64
+	// DedupThreshold is the squared-L2 novelty radius. If a new memory's
+	// nearest existing neighbor (same tenant) is closer than this, Remember
+	// treats it as a duplicate and does not persist it. 0 disables dedup.
+	DedupThreshold float32
 }
 
 // New wraps a journal with semantic memory, rebuilding the in-RAM index from
@@ -98,25 +102,49 @@ func New(journal *sentry.Store, embed Embedder) (*Store, error) {
 	return s, nil
 }
 
-// Remember embeds text, persists it to the journal as an EventMemory, and adds
-// it to the in-RAM index. Returns the assigned memory id.
-func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src string) (uint64, error) {
+// Remember embeds text and, unless it duplicates an existing memory, persists it
+// to the journal as an EventMemory and adds it to the in-RAM index. When dedup
+// is enabled (DedupThreshold > 0) and the nearest existing memory for tenant is
+// within that squared-L2 radius, the text is NOT persisted: the existing id is
+// returned with deduped=true. Otherwise the new id is returned with deduped=false.
+func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src string) (id uint64, deduped bool, err error) {
 	vecs, err := s.embed.Embed([]string{text})
 	if err != nil {
-		return 0, fmt.Errorf("memory: embed: %w", err)
+		return 0, false, fmt.Errorf("memory: embed: %w", err)
 	}
 	if len(vecs) != 1 || len(vecs[0]) != s.embed.Dim() {
-		return 0, fmt.Errorf("memory: embedder returned %d vectors / bad dim", len(vecs))
+		return 0, false, fmt.Errorf("memory: embedder returned %d vectors / bad dim", len(vecs))
 	}
+	v := vecs[0]
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p := MemoryPayload{ID: s.nextID, Text: text, Vector: vecs[0], Tags: tags, Source: src}
+
+	if s.DedupThreshold > 0 {
+		var bestID uint64
+		var bestDist float32
+		found := false
+		for _, e := range s.entries {
+			if e.tenant != tenant {
+				continue
+			}
+			d := sqL2(v, e.mem.Vector)
+			if !found || d < bestDist {
+				found, bestDist, bestID = true, d, e.mem.ID
+			}
+		}
+		if found && bestDist < s.DedupThreshold {
+			return bestID, true, nil
+		}
+	}
+
+	p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: tags, Source: src}
 	if _, err := s.journal.Append(tenant, EventMemory, p); err != nil {
-		return 0, fmt.Errorf("memory: append: %w", err)
+		return 0, false, fmt.Errorf("memory: append: %w", err)
 	}
 	s.entries = append(s.entries, entry{tenant: tenant, mem: p})
 	s.nextID++
-	return p.ID, nil
+	return p.ID, false, nil
 }
 
 // Recall embeds query and returns the k nearest memories for tenant, ascending
