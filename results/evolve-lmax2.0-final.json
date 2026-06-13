@@ -1,0 +1,120 @@
+{
+ "Champion": {
+  "Pheno": {
+   "Nlist": 64,
+   "M": 96,
+   "K": 256,
+   "Nprobe": 32,
+   "RerankK": 50
+  },
+  "RecallE": 0.981,
+  "RecallH": [
+   0.985,
+   0.985,
+   0.98525
+  ],
+  "WorstSeed": 0.985,
+  "USPerQuery": 35081.045,
+  "Proxy": 17334720,
+  "ProxyOfLmax": 0.9987610208303372
+ },
+ "Finalists": [
+  {
+   "Pheno": {
+    "Nlist": 64,
+    "M": 96,
+    "K": 256,
+    "Nprobe": 32,
+    "RerankK": 50
+   },
+   "RecallE": 0.981,
+   "RecallH": [
+    0.985,
+    0.985,
+    0.98525
+   ],
+   "WorstSeed": 0.985,
+   "USPerQuery": 35081.045,
+   "Proxy": 17334720,
+   "ProxyOfLmax": 0.9987610208303372
+  },
+  {
+   "Pheno": {
+    "Nlist": 32,
+    "M": 96,
+    "K": 256,
+    "Nprobe": 16,
+    "RerankK": 100
+   },
+   "RecallE": 0.98,
+   "RecallH": [
+    0.984,
+    0.982,
+    0.983
+   ],
+   "WorstSeed": 0.982,
+   "USPerQuery": 25332,
+   "Proxy": 11070912,
+   "ProxyOfLmax": 0.6378640884100136
+  },
+  {
+   "Pheno": {
+    "Nlist": 32,
+    "M": 96,
+    "K": 256,
+    "Nprobe": 16,
+    "RerankK": 200
+   },
+   "RecallE": 0.98,
+   "RecallH": [
+    0.984,
+    0.982,
+    0.983
+   ],
+   "WorstSeed": 0.982,
+   "USPerQuery": 26036.455,
+   "Proxy": 11224512,
+   "ProxyOfLmax": 0.64671393962189
+  }
+ ],
+ "Baseline": {
+  "Pheno": {
+   "Nlist": 64,
+   "M": 96,
+   "K": 256,
+   "Nprobe": 16,
+   "RerankK": 0
+  },
+  "RecallE": 0.92,
+  "RecallH": [
+   0.9155,
+   0.91975,
+   0.92025
+  ],
+  "WorstSeed": 0.9155,
+  "USPerQuery": 19618.505,
+  "Proxy": 8678112,
+  "ProxyOfLmax": 0.5
+ },
+ "BaselineRerank": {
+  "Pheno": {
+   "Nlist": 64,
+   "M": 96,
+   "K": 256,
+   "Nprobe": 16,
+   "RerankK": 200
+  },
+  "RecallE": 0.943,
+  "RecallH": [
+   0.94125,
+   0.94775,
+   0.9485
+  ],
+  "WorstSeed": 0.94125,
+  "USPerQuery": 18051.52,
+  "Proxy": 8985312,
+  "ProxyOfLmax": 0.517699702423753
+ },
+ "EHGapChampion": -0.0040000000000000036,
+ "Note": "champion = best WORST-SEED holdout recall; E-H gap is the subsample-overfit audit; differences under ~1.5pp on H are noise"
+}

@@ -177,17 +177,49 @@ adversarial review, not the build:
 originals (DiskANN-style; the journal/CAS already wants the originals anyway) — fixes the ADC-underestimate
 failures the diag isolated, with no resident/non-resident asymmetry to exploit or entrench.
 
+## ✅ GA AUTO-TUNER: the engine learned its own config — +6.95pp validated (2026-06-12, branch `feat/evolve-tuner`)
+
+**Built (TDD, 23 new tests, multi-agent design panel + adversarial critic before coding):**
+- `internal/evolve` — deterministic GA over discrete grids: tournament, uniform crossover, creep±1/reset
+  mutation, elitism, immigrants, patience early-stop, seeded individuals, per-genome fitness cache.
+- `cmd/evolve` — evolves `(nlist, M, K, nprobe-fraction, rerankK)` on the real 47k×768 embeddings.
+  Anti-self-deception protocol baked in: grids valid by construction (M = divisors of 768 ≤96 ⇒ Dim%M
+  and the 32× class hold for free; codes are uint8 so K<256 saves ZERO storage); nprobe is a FRACTION of
+  nlist; `rerankK` = NEW exact-SqL2 re-rank stage of the ADC shortlist (the data-picked lever — test-pinned:
+  rerank-everything == exact search); fitness = recall@10 (hitIn semantics, precomputed exact GT) on a fixed
+  1000-query E set; latency only as deterministic cost proxy (never wall-clock; run aborts if budget admits
+  brute force); kmeans seed is NOT a gene. Final validation: top-3 × 3 kmeans seeds on the pristine
+  4000-query holdout H; champion = best WORST-seed recall; single-thread wall-clock w/ anti-DCE.
+
+**Result (full run, pop 24, early-stopped gen 8, 111 evals / 56 geometries, 2.5h on tesla):**
+| config | worst-seed recall(H) | measured µs/q |
+|---|---|---|
+| baseline `64-96-256-16-0` (hand-picked) | 0.9155 | 19,619 |
+| baseline + rerank200 | 0.9413 | 18,052 |
+| **champion `64-96-256-32-50`** | **0.9850 (+6.95pp)** | 35,081 (1.79×) |
+| **runner-up `32-96-256-16-100`** | **0.9820 (+6.65pp)** | **25,332 (1.29×)** |
+
+- E−H gap = −0.004 → zero subsample overfit. Proxy calibration: predicted 1.28× for runner-up, measured 1.29×.
+- **The deployable insight is the RUNNER-UP**: 96% of the gain at 1.29× latency — fewer/bigger cells
+  (nlist 32, probe half) + exact re-rank of top-100. Exactly the fix for the diag-isolated failure modes
+  (distractor loss + ADC underestimates). Exact re-rank saturates by K≈100.
+- Artifacts: `results/evolve-lmax2.0-final.json` + `.log` (repo); tesla `/tmp/evolve-out/`.
+- A confirmation run at a realistic budget (`-lmax-mult 1.3`, out `/tmp/evolve-13`) was launched on tesla.
+
 ## Pending / next steps (Alvin's queue)
-1. **Merge `feat/operational-cache`** (cache sim + exact tier + cachebench + corrected claims + this HANDOFF).
-2. **Symmetric shortlist re-rank with on-disk originals** (the data-picked recall lever; see above).
-   Estimate first: exact@10 ceiling for re-rank of top-200 at M=96 (cheap to measure in cachebench).
+1. **Read `/tmp/evolve-13` result on tesla** (1.3×-budget GA run) → pick the production config; then
+   **apply the evolved config** (likely runner-up `32-96-256-16-100`) as the new default + wire the exact
+   re-rank stage into `ivf.Search`/`SearchTiered` production path (it lives only in the lab harness today).
+2. **Merge `feat/operational-cache`**, then `feat/evolve-tuner` (PR each).
 3. Wire the id-addressed serving path end-to-end: registry item id → Handle.Hash adapter so
    `cache.ExactTier` + `ivf.SearchTiered` serve `memory.recall`-by-path from RAM (the 140ns path).
 4. Grow real volume + (multi-agent) other Claude Code instances feeding the same tenant via the installer
    (`curl …:8810/install.sh | SENTRY_MCP_TOKEN=… sh`) → richer access, more robust numbers.
-5. Closed on real text: RD bit-allocation (A/D/F) — just spend bytes (M). NOW ALSO CLOSED: exact-tier
-   merge as a recall lever (closed-loop negative). Don't reopen either without new structure.
-6. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`).
+5. Closed on real text: RD bit-allocation (A/D/F) — just spend bytes (M). ALSO CLOSED: exact-tier merge as
+   a recall lever (closed-loop negative). NOW OPEN AND WON: exact shortlist re-rank (+6.6–7.0pp, GA-validated).
+6. GP direction (next "self-correcting" lever candidate): evolve a per-query ADAPTIVE policy (e.g. dynamic
+   nprobe/rerank from coarse-distance margins) — genetic programming over policy expressions, not just knobs.
+7. Later: SentryLog roadmap (CAS, dedup `task.check`, more MCP tools, `memory.recall`).
 
 ## Operational notes
 - VM service: `systemctl {status,restart} sentrymcp`; binary `/root/sentrymcp` (prev `/root/sentrymcp.old`),
@@ -214,28 +246,29 @@ New Claude Code session on any project → ask it to use `record_access` while w
 > Retomamos Matrix Sentry (motor de memoria para agentes, Go puro, repo privado
 > github.com/AlvinTLC/matrix-sentry). Lee HANDOFF.md y la memoria auto-cargada
 > (MEMORY.md, sobre todo [[access-driven-rd-indexing]] y [[sentrylog-mcp-bridge]])
-> ANTES de actuar. ESTADO: hook PostToolUse VIVO (journal ~2400+ accesos, ~600
-> archivos); `sentrymcp` systemd en http://10.10.10.96:8808/mcp. RESULTADO CLAVE
-> última sesión: construimos el TIER EXACTO (cache.ExactTier + ivf.SearchTiered,
-> TDD, 5 tests) + modelo de costo + cachebench sobre embeddings reales (tesla,
-> 47k×768) — y la verificación adversarial (26 agentes) + el re-run CLOSED-LOOP
-> INVIRTIERON la conclusión de recall: cachear lo que el engine devuelve atrinchera
-> sus errores (Δstream −0.3..−1.1pp, peor con más prefetch); el gain open-loop era
-> artefacto del stream-oráculo. El tier exacto NO es palanca de recall en deployment
-> (Δall≈0, sin daño global; queda scoped a SERVIR items conocidos: hit id-addressed
-> ~140ns vs fetch ~200µs). LO QUE SÍ vive: el caché id-addressed sobre el journal
-> REAL — MK vs LRU +1.7..+3.5pp hit / −2.8..−5.6% latencia de camino crítico /
-> +16..44% bandwidth off-path (n=2433). Engine real: búsqueda 14.3ms/q single-thread
-> (M=96, 47k). Branch `feat/operational-cache` con todo commiteado (sin mergear).
-> SIGUIENTE PALANCA (elegida por los datos, diag: los fallos de recall son ADC
-> UNDERESTIMATES de distractores, no near-dups): re-rank EXACTO y SIMÉTRICO del
-> shortlist completo con originales en disco (estilo DiskANN — el CAS del roadmap
-> ya quiere los originales). Primero medir el techo: exact re-rank de top-200 en
-> cachebench (barato). Después: adapter registry-id→Handle.Hash para servir
-> memory.recall-by-path desde RAM. Empieza confirmando `go build ./... && go test
-> ./...` verde, VM viva (`ssh matrix-sentry systemctl is-active sentrymcp`), y
-> cachesim sobre SNAPSHOT del journal (NUNCA sentry.Open el dir vivo): ssh
-> matrix-sentry 'rm -rf /tmp/snap && mkdir /tmp/snap && cp /root/sentry-journal/*.log
-> /tmp/snap/ && /root/cachesim -dir /tmp/snap'. VMs: `ssh matrix-sentry` (journal),
-> `ssh tesla` (dataset /tmp/sembed-big/big_*, resultados /tmp/cache*.out). Verifica
-> adversarialmente antes de creer: esta sesión el closed-loop invirtió el resultado.
+> ANTES de actuar. ESTADO: hook PostToolUse VIVO; `sentrymcp` systemd en
+> http://10.10.10.96:8808/mcp. RESULTADO CLAVE última sesión (2026-06-12, branch
+> `feat/evolve-tuner`, commiteado y pusheado): EL MOTOR APRENDIÓ A AUTOAJUSTARSE —
+> GA auto-tuner (internal/evolve + cmd/evolve, TDD 23 tests, diseño por panel
+> multi-agente + crítico adversarial) evolucionó (nlist, M, K, nprobe-frac,
+> rerankK) sobre los embeddings reales (tesla, 47k×768) con protocolo
+> anti-autoengaño (fitness en E=1000 queries fijas, GT exacto precomputado,
+> latencia solo como proxy determinista, semilla kmeans NO es gen, validación
+> final top-3 × 3 semillas en holdout H=4000 virgen, campeón = peor-semilla).
+> RESULTADO VALIDADO: campeón `64-96-256-32-50` recall worst-seed 0.9850 (+6.95pp
+> vs baseline 0.9155) a 1.79× latencia; runner-up `32-96-256-16-100` 0.9820
+> (+6.65pp) a SOLO 1.29× — la frontera eficiente: menos células + re-rank exacto
+> top-100 (satura en ~100). E−H gap −0.004 (cero overfit); proxy predijo 1.28×,
+> midió 1.29×. La palanca "re-rank exacto del shortlist" queda GANADA Y CERRADA.
+> Artefactos: results/evolve-lmax2.0-*.json/log + tesla /tmp/evolve-out/. PENDIENTE
+> INMEDIATO: (1) leer /tmp/evolve-13 en tesla (run de confirmación a presupuesto
+> 1.3× que dejamos corriendo) y elegir config de producción; (2) APLICAR la config
+> evolucionada + llevar el re-rank exacto al path de producción (hoy vive solo en
+> el harness); (3) mergear feat/operational-cache y feat/evolve-tuner; (4) siguiente
+> palanca de "autocorrección": GP de políticas adaptativas por query (nprobe/rerank
+> dinámicos según márgenes de distancia coarse). Empieza confirmando `go build
+> ./... && go test ./...` verde, VM viva (`ssh matrix-sentry systemctl is-active
+> sentrymcp`), y el resultado de /tmp/evolve-13. VMs: `ssh matrix-sentry` (journal),
+> `ssh tesla` (dataset /tmp/sembed-big/big_*, runs /tmp/evolve-*). Verifica
+> adversarialmente antes de creer — el protocolo del tuner existe porque el
+> closed-loop ya nos invirtió una conclusión una vez.
