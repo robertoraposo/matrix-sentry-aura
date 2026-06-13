@@ -70,3 +70,25 @@ from the unit-test geometry — τ cannot be set from this transcript prose. It 
 paraphrases of the SAME fact must fall below τ, distinct facts comfortably above it. Until then,
 the dedup unit tests pin behavior with a synthetic τ (geoEmbedder: 0.01 < τ=0.05 < 0.25), and the
 server default `SENTRY_DEDUP_TAU=0` keeps dedup off until calibrated.
+
+## Verification (Task 7) — τ calibrated against the real embedder
+
+`cmd/tauprobe` embedded a probe set (paraphrase pairs of the same durable fact + distinct facts)
+through the production embedder (tesla `nomic-embed-text-v2-moe`, dim 768, via the VM) and measured
+pairwise squared-L2:
+
+| metric | squared-L2 |
+|--------|-----------|
+| max within-paraphrase (must dedup)      | 0.667 |
+| min across distinct facts (must NOT dedup) | 1.238 |
+
+Clean separation (~1.85× gap). The probe's midpoint suggestion was 0.953, but **τ is chosen as
+`0.85`** — biased toward the safe side because the cost is asymmetric: a false positive merges two
+distinct facts and loses knowledge permanently, while a false negative only stores a cheap
+near-duplicate (and the reflection prompt's recall-first step is the first line of defense anyway).
+τ=0.85 sits 0.18 above the paraphrase max (restatements dedup) and 0.39 below the distinct min
+(strong protection against merging). **Deploy:** `SENTRY_DEDUP_TAU=0.85`.
+
+Reflection dry-run: covered by the Phase-0 labeling above — the windows labeled durable (47–60%)
+are exactly what a threshold-triggered reflection would surface, and the example facts confirm they
+are genuine decisions/conventions/gotchas, not noise.
