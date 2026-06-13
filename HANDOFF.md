@@ -309,30 +309,32 @@ New Claude Code session on any project → ask it to use `record_access` while w
 
 > Retomamos Matrix Sentry (motor de memoria para agentes, Go puro, repo privado
 > github.com/AlvinTLC/matrix-sentry). Lee HANDOFF.md y la memoria auto-cargada
-> (MEMORY.md, sobre todo [[access-driven-rd-indexing]] y [[sentrylog-mcp-bridge]])
-> ANTES de actuar. ESTADO: hook PostToolUse VIVO; `sentrymcp` systemd en
-> http://10.10.10.96:8808/mcp. RESULTADO CLAVE última sesión (2026-06-12, branch
-> `feat/evolve-tuner`, commiteado y pusheado): EL MOTOR APRENDIÓ A AUTOAJUSTARSE —
-> GA auto-tuner (internal/evolve + cmd/evolve, TDD 23 tests, diseño por panel
-> multi-agente + crítico adversarial) evolucionó (nlist, M, K, nprobe-frac,
-> rerankK) sobre los embeddings reales (tesla, 47k×768) con protocolo
-> anti-autoengaño (fitness en E=1000 queries fijas, GT exacto precomputado,
-> latencia solo como proxy determinista, semilla kmeans NO es gen, validación
-> final top-3 × 3 semillas en holdout H=4000 virgen, campeón = peor-semilla).
-> RESULTADO VALIDADO: campeón `64-96-256-32-50` recall worst-seed 0.9850 (+6.95pp
-> vs baseline 0.9155) a 1.79× latencia; runner-up `32-96-256-16-100` 0.9820
-> (+6.65pp) a SOLO 1.29× — la frontera eficiente: menos células + re-rank exacto
-> top-100 (satura en ~100). E−H gap −0.004 (cero overfit); proxy predijo 1.28×,
-> midió 1.29×. La palanca "re-rank exacto del shortlist" queda GANADA Y CERRADA.
-> Artefactos: results/evolve-lmax2.0-*.json/log + tesla /tmp/evolve-out/. PENDIENTE
-> INMEDIATO: (1) leer /tmp/evolve-13 en tesla (run de confirmación a presupuesto
-> 1.3× que dejamos corriendo) y elegir config de producción; (2) APLICAR la config
-> evolucionada + llevar el re-rank exacto al path de producción (hoy vive solo en
-> el harness); (3) mergear feat/operational-cache y feat/evolve-tuner; (4) siguiente
-> palanca de "autocorrección": GP de políticas adaptativas por query (nprobe/rerank
-> dinámicos según márgenes de distancia coarse). Empieza confirmando `go build
-> ./... && go test ./...` verde, VM viva (`ssh matrix-sentry systemctl is-active
-> sentrymcp`), y el resultado de /tmp/evolve-13. VMs: `ssh matrix-sentry` (journal),
-> `ssh tesla` (dataset /tmp/sembed-big/big_*, runs /tmp/evolve-*). Verifica
-> adversarialmente antes de creer — el protocolo del tuner existe porque el
-> closed-loop ya nos invirtió una conclusión una vez.
+> (MEMORY.md: [[ga-auto-tuner]], [[cloudflare-mcp-oauth]], [[sentrylog-mcp-bridge]],
+> [[access-driven-rd-indexing]]) ANTES de actuar. **TODO mergeado en `main`** (no
+> quedan ramas feature). ESTADO (cierre 2026-06-13): el sistema completo funciona
+> end-to-end. (1) MOTOR autoajustado: GA tuner (internal/evolve + cmd/evolve) →
+> `ivf.Recommended(768)` = geometría 64-96-64 + nprobe 32 + rerankK 200 (re-rank
+> exacto `ivf.SearchRerank`), +6.9pp recall worst-seed holdout; el GA descubrió
+> que K=64 (PQ más barato) gana porque el re-rank corrige el error de cuant.
+> (2) MEMORIA SEMÁNTICA: paquete `memory/` (Remember/Recall sobre el journal,
+> búsqueda exacta) cableado al MCP como tools `remember`/`recall`. (3) PÚBLICO:
+> `https://mcp.blazesphere.net/mcp` (Cloudflare tunnel + OAuth 2.1 nativo en
+> cmd/sentrymcp para claude.ai; passphrase de consentimiento = SENTRY_MCP_TOKEN;
+> embeddings vía Ollama de tesla nomic-embed-text-v2-moe dim768 por tailscale).
+> (4) AUTO-USO: hook PostToolUse `sentry-record` (captura accesos, ~5/min) +
+> NUEVO hook SessionStart `sentry-recall` (inyecta top-5 memorias del proyecto al
+> abrir sesión; query=basename del cwd). Connector claude.ai VERIFICADO (guardó 23
+> memorias reales). PENDIENTES INMEDIATOS: (a) desactivar Cloudflare Bot Fight Mode
+> para blazesphere.net (connector web fiable); (b) **AUTO-REMEMBER** — falta el
+> eslabón: record_access y recall son automáticos, pero remember sigue manual, así
+> que el corpus no crece solo; (c) mejorar la query del recall (git-remote/README
+> en vez de basename — distancias se agrupan ~1.3, orden imperfecto); (d) palanca
+> de autocorrección: GP de políticas adaptativas por query (nprobe/rerank dinámicos
+> según márgenes coarse); (e) escalar memory.Store de búsqueda exacta a
+> ivf.Recommended cuando crezca el corpus. Empieza confirmando `go build ./... &&
+> go test ./...` verde (17 paquetes) y servicios vivos (`ssh matrix-sentry
+> 'systemctl is-active sentrymcp cloudflared'`). VMs: `ssh matrix-sentry` (journal,
+> token en /root/sentrymcp.env), `ssh tesla` (Ollama + dataset /tmp/sembed-big).
+> NUNCA `sentry.Open` el dir vivo — copia los .log primero. Verifica
+> adversarialmente antes de creer (el closed-loop ya nos invirtió una conclusión, y
+> los chequeos baratos —nprobe, semilla, escala— corrigieron 3 más).
