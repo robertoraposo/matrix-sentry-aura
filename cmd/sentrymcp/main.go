@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,7 @@ func main() {
 	ollamaURL := flag.String("ollama", envOr("SENTRY_OLLAMA_URL", ""), "Ollama base URL for embeddings (enables remember/recall); empty = memory tools disabled")
 	embedModel := flag.String("embed-model", envOr("SENTRY_EMBED_MODEL", "nomic-embed-text"), "embedding model name")
 	embedDim := flag.Int("embed-dim", 768, "embedding dimension (nomic-embed-text = 768)")
+	dedupTau := flag.Float64("dedup-tau", envFloat("SENTRY_DEDUP_TAU", 0), "squared-L2 dedup radius for remember (0 = off); set from Phase-0 calibration")
 	flag.Parse()
 
 	store, err := sentry.Open(*dir, sentry.Options{FsyncEvery: 75 * time.Millisecond})
@@ -102,6 +104,7 @@ func main() {
 			os.Exit(1)
 		}
 		s.mem = mem
+		s.mem.DedupThreshold = float32(*dedupTau)
 		moko.Info("semantic memory enabled", map[string]string{"ollama": *ollamaURL, "model": *embedModel, "dim": fmt.Sprint(*embedDim)})
 	}
 
@@ -391,12 +394,15 @@ func (s *server) callTool(req rpcReq) rpcResp {
 		src, _ := strArg(p.Args, "src")
 		tags := stringsArg(p.Args, "tags")
 		s.mu.Lock()
-		id, err := s.mem.Remember(s.tenant, text, tags, src)
+		id, deduped, err := s.mem.Remember(s.tenant, text, tags, src)
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "remember failed: "+err.Error())
 		}
-		s.moko.Info("remember", map[string]string{"tenant": fmt.Sprint(s.tenant), "id": fmt.Sprint(id), "tags": fmt.Sprint(tags), "len": fmt.Sprint(len(text))})
+		s.moko.Info("remember", map[string]string{"tenant": fmt.Sprint(s.tenant), "id": fmt.Sprint(id), "tags": fmt.Sprint(tags), "len": fmt.Sprint(len(text)), "deduped": fmt.Sprint(deduped)})
+		if deduped {
+			return s.toolText(req.ID, fmt.Sprintf("already known as memory #%d (deduped, not stored again)", id))
+		}
 		return s.toolText(req.ID, fmt.Sprintf("remembered as memory #%d", id))
 	case "recall":
 		if s.mem == nil {
@@ -465,6 +471,15 @@ func stringsArg(args map[string]any, key string) []string {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
 	}
 	return def
 }
