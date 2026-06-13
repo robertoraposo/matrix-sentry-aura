@@ -24,7 +24,6 @@ type line struct {
 type block struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
-	Name string `json:"name"`
 }
 
 // parseContent decodes a message's content, which is either a JSON string (a

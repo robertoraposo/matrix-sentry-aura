@@ -50,3 +50,33 @@ func TestWindowsSegmentByToolUseCount(t *testing.T) {
 		t.Fatalf("session = %q, want sess1", w[0].Session)
 	}
 }
+
+func TestWindowsExactMultipleNoTrailingFlush(t *testing.T) {
+	// k == total tool-uses -> exactly one window, no extra trailing window.
+	w, err := Windows("s", strings.NewReader(fixture), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w) != 1 {
+		t.Fatalf("got %d windows, want 1", len(w))
+	}
+	if w[0].ToolUses != 3 {
+		t.Fatalf("ToolUses = %d, want 3", w[0].ToolUses)
+	}
+}
+
+func TestWindowsKOnePerToolUse(t *testing.T) {
+	// k == 1 -> every tool-use is its own window.
+	w, err := Windows("s", strings.NewReader(fixture), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w) != 3 {
+		t.Fatalf("got %d windows, want 3", len(w))
+	}
+	for i, win := range w {
+		if win.ToolUses != 1 {
+			t.Fatalf("window %d ToolUses = %d, want 1", i, win.ToolUses)
+		}
+	}
+}
