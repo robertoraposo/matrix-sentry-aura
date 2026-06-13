@@ -242,10 +242,28 @@ model) can store context and recall it by meaning across sessions.
 - **Single dependency:** production embeddings need tesla's Ollama reachable; if it's down remember/recall
   error cleanly and the rest of the MCP keeps serving.
 
+## ✅ PUBLIC ACCESS: Cloudflare Tunnel + native OAuth for claude.ai (2026-06-13)
+
+- **Cloudflare Tunnel** on the VM (`cloudflared` systemd, tunnel `matrix-sentry` UUID `bf3a00c0…`):
+  `https://mcp.blazesphere.net/mcp` → `localhost:8808`. Config `/etc/cloudflared/config.yml`, zone
+  `blazesphere.net`. Stable public HTTPS, no ports opened.
+- **Native OAuth 2.1 AS in sentrymcp** (`cmd/sentrymcp/oauth.go`, pure-Go, TDD) — because claude.ai
+  connectors require OAuth, not the static bearer. Enabled via `SENTRY_OAUTH_ISSUER=https://mcp.blazesphere.net`.
+  Discovery + DCR + authorize/PKCE + token + refresh; consent page passphrase = `SENTRY_MCP_TOKEN`;
+  stateless HS256 JWTs (survive restarts). `/mcp` accepts EITHER the static bearer (Claude Code) OR an
+  OAuth access token (claude.ai); 401 carries `WWW-Authenticate`. Verified end-to-end through the tunnel.
+- **Two ways to connect now:** (a) Claude Code remote: `claude mcp add --transport http matrix-sentry
+  https://mcp.blazesphere.net/mcp --header "Authorization: Bearer <SENTRY_MCP_TOKEN>" --scope user`;
+  (b) claude.ai custom connector: add `https://mcp.blazesphere.net/mcp`, consent with the passphrase.
+- **⚠️ MUST DO in Cloudflare dashboard:** disable **Bot Fight Mode** for `blazesphere.net` (Security →
+  Bots) — Anthropic's connector broker is server-to-server and gets bot-blocked silently otherwise.
+
 ## Pending / next steps (Alvin's queue)
-1. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
-   corpus grows large enough to need it (API is unchanged; originals fetch = the persisted vectors/CAS).
-2. **Merge `feat/operational-cache`**, then `feat/evolve-tuner` (PR each).
+1. **Disable Bot Fight Mode** for the zone (above) before relying on the claude.ai web connector.
+2. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
+   corpus grows large enough to need it (API unchanged; originals fetch = persisted vectors/CAS).
+3. `main` now holds everything (operational cache, GA tuner, ivf.Recommended, semantic memory, OAuth).
+   `feat/operational-cache` / `feat/evolve-tuner` branches are merged and can be deleted.
 3. Wire the id-addressed serving path end-to-end: registry item id → Handle.Hash adapter so
    `cache.ExactTier` + `ivf.SearchTiered` serve `memory.recall`-by-path from RAM (the 140ns path).
 4. Grow real volume + (multi-agent) other Claude Code instances feeding the same tenant via the installer
