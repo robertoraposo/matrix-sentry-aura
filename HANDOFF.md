@@ -266,8 +266,10 @@ sat idle — the engine was wired but the semantic memory was a drawer nobody op
 `~/.claude/settings.json`) that recalls the top-5 memories for the current project (query = cwd basename)
 and injects them as `additionalContext` at session start. Best-effort (clean exit 0 if the server is
 slow/down; 5s timeout; synchronous so stdout injects). Activates on the NEXT session start. Now both halves
-are automatic: passive capture (record_access) + active injection (recall). Next: improve the recall query
-(git remote/README beats cwd basename — distances cluster, ordering is imperfect).
+are automatic: passive capture (record_access) + active injection (recall). ✅ Recall query improved
+(2026-06-13): `cmd/sentry-recall` now builds the query from the git-remote `org/repo` slug + the README
+heading/intro (pure-Go `.git/config` parse, basename fallback, capped 500), instead of the bare cwd
+basename whose distances clustered. Reinstalled at `~/.local/bin/sentry-recall`; activates next session.
 
 ## ✅ AUTO-REMEMBER LIVE — the third leg is now automatic (2026-06-13)
 
