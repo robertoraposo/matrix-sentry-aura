@@ -1,0 +1,120 @@
+{
+ "Champion": {
+  "Pheno": {
+   "Nlist": 64,
+   "M": 96,
+   "K": 128,
+   "Nprobe": 32,
+   "RerankK": 200
+  },
+  "RecallE": 0.982,
+  "RecallH": [
+   0.9855,
+   0.98575,
+   0.98625
+  ],
+  "WorstSeed": 0.9855,
+  "USPerQuery": 26897.17,
+  "Proxy": 11273664,
+  "ProxyOfLmax": 0.999301372322601
+ },
+ "Finalists": [
+  {
+   "Pheno": {
+    "Nlist": 64,
+    "M": 96,
+    "K": 128,
+    "Nprobe": 32,
+    "RerankK": 200
+   },
+   "RecallE": 0.982,
+   "RecallH": [
+    0.9855,
+    0.98575,
+    0.98625
+   ],
+   "WorstSeed": 0.9855,
+   "USPerQuery": 26897.17,
+   "Proxy": 11273664,
+   "ProxyOfLmax": 0.999301372322601
+  },
+  {
+   "Pheno": {
+    "Nlist": 64,
+    "M": 96,
+    "K": 64,
+    "Nprobe": 32,
+    "RerankK": 200
+   },
+   "RecallE": 0.981,
+   "RecallH": [
+    0.98475,
+    0.98525,
+    0.9855
+   ],
+   "WorstSeed": 0.98475,
+   "USPerQuery": 21266.955,
+   "Proxy": 8127936,
+   "ProxyOfLmax": 0.7204629833699383
+  },
+  {
+   "Pheno": {
+    "Nlist": 64,
+    "M": 96,
+    "K": 64,
+    "Nprobe": 32,
+    "RerankK": 400
+   },
+   "RecallE": 0.981,
+   "RecallH": [
+    0.98525,
+    0.98575,
+    0.98625
+   ],
+   "WorstSeed": 0.98525,
+   "USPerQuery": 22183.38,
+   "Proxy": 8435136,
+   "ProxyOfLmax": 0.7476932947910967
+  }
+ ],
+ "Baseline": {
+  "Pheno": {
+   "Nlist": 64,
+   "M": 96,
+   "K": 256,
+   "Nprobe": 16,
+   "RerankK": 0
+  },
+  "RecallE": 0.92,
+  "RecallH": [
+   0.9155,
+   0.91975,
+   0.92025
+  ],
+  "WorstSeed": 0.9155,
+  "USPerQuery": 18046.185,
+  "Proxy": 8678112,
+  "ProxyOfLmax": 0.7692307692307693
+ },
+ "BaselineRerank": {
+  "Pheno": {
+   "Nlist": 64,
+   "M": 96,
+   "K": 256,
+   "Nprobe": 16,
+   "RerankK": 200
+  },
+  "RecallE": 0.943,
+  "RecallH": [
+   0.94125,
+   0.94775,
+   0.9485
+  ],
+  "WorstSeed": 0.94125,
+  "USPerQuery": 18517.78,
+  "Proxy": 8985312,
+  "ProxyOfLmax": 0.7964610806519277
+ },
+ "EHGapChampion": -0.0035000000000000586,
+ "Note": "champion = best WORST-SEED holdout recall; E-H gap is the subsample-overfit audit; differences under ~1.5pp on H are noise"
+}

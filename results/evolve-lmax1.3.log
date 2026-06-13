@@ -1,0 +1,34 @@
+== evolve · N=47674 dim=768 learn=47674 queries=5000 ==
+baseline 64-96-256-16-0 proxy=8.68M ops · Lmax=11.28M (x1.3) · |E|=1000 |H|=4000
+gen  0 · best 32-96-256-16-100 recall=0.9800 · mean 0.0674 · evals 24 · trainings 16 · 2031s
+gen  1 · best 32-96-256-16-100 recall=0.9800 · mean 0.7174 · evals 41 · trainings 25 · 3470s
+gen  2 · best 32-96-256-16-100 recall=0.9800 · mean 0.6235 · evals 59 · trainings 30 · 3881s
+gen  3 · best 32-96-256-16-100 recall=0.9800 · mean 0.8907 · evals 70 · trainings 36 · 4521s
+gen  4 · best 32-96-256-16-100 recall=0.9800 · mean 0.8324 · evals 86 · trainings 41 · 5189s
+gen  5 · best 32-96-256-16-100 recall=0.9800 · mean 0.6902 · evals 94 · trainings 45 · 6006s
+gen  6 · best 32-96-256-16-100 recall=0.9800 · mean 0.4781 · evals 105 · trainings 47 · 6415s
+gen  7 · best 64-96-64-32-400 recall=0.9810 · mean 0.8007 · evals 117 · trainings 54 · 8105s
+gen  8 · best 64-96-64-32-400 recall=0.9810 · mean 0.0764 · evals 129 · trainings 56 · 8350s
+gen  9 · best 64-96-64-32-400 recall=0.9810 · mean 0.7063 · evals 139 · trainings 60 · 9329s
+gen 10 · best 64-96-64-32-400 recall=0.9810 · mean 0.8110 · evals 144 · trainings 61 · 9451s
+gen 11 · best 64-96-64-32-400 recall=0.9810 · mean 0.7282 · evals 150 · trainings 65 · 9806s
+gen 12 · best 64-96-64-32-400 recall=0.9810 · mean 0.9651 · evals 153 · trainings 67 · 10071s
+gen 13 · best 64-96-128-32-200 recall=0.9820 · mean 0.8586 · evals 162 · trainings 72 · 10737s
+gen 14 · best 64-96-128-32-200 recall=0.9820 · mean 0.8807 · evals 166 · trainings 75 · 10917s
+gen 15 · best 64-96-128-32-200 recall=0.9820 · mean 0.4499 · evals 171 · trainings 77 · 11127s
+gen 16 · best 64-96-128-32-200 recall=0.9820 · mean 0.8181 · evals 173 · trainings 77 · 11127s
+gen 17 · best 64-96-128-32-200 recall=0.9820 · mean 0.9178 · evals 177 · trainings 78 · 11228s
+gen 18 · best 64-96-128-32-200 recall=0.9820 · mean 0.6977 · evals 182 · trainings 79 · 11835s
+gen 19 · best 64-96-128-32-200 recall=0.9820 · mean 0.1542 · evals 187 · trainings 80 · 11933s
+gen 20 · best 64-96-128-32-200 recall=0.9820 · mean 0.7330 · evals 197 · trainings 86 · 13018s
+gen 21 · best 64-96-128-32-200 recall=0.9820 · mean 0.3610 · evals 202 · trainings 87 · 13364s
+
+GA done: best 64-96-128-32-200 recall(E)=0.9820 after 202 evals, 87 trainings, 13364s
+finalist 64-96-128-32-200: E=0.9820 H=[0.9855 0.98575 0.98625] worst=0.9855 26897µs/q
+finalist 64-96-64-32-200: E=0.9810 H=[0.98475 0.98525 0.9855] worst=0.9848 21267µs/q
+finalist 64-96-64-32-400: E=0.9810 H=[0.98525 0.98575 0.98625] worst=0.9852 22183µs/q
+
+== FINAL (holdout H, worst-seed) ==
+baseline        64-96-256-16-0: worst=0.9155  18046µs/q
+baseline+rr200  64-96-256-16-200: worst=0.9413  18518µs/q
+CHAMPION        64-96-128-32-200: worst=0.9855  26897µs/q  (E-H gap -0.0035)

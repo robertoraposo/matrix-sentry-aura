@@ -15,6 +15,24 @@ func TestHashVecDeterministicAndDistinct(t *testing.T) {
 	}
 }
 
+func TestHashVecExportedMatchesAddedHandle(t *testing.T) {
+	if HashVec([]float32{1, 2, 3, 4}) != hashVec([]float32{1, 2, 3, 4}) {
+		t.Fatal("HashVec must equal the internal hashVec")
+	}
+	ix, err := New(Config{Dim: 4, Nlist: 2, M: 2, K: 4, Iter: 5, Seed: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Train([][]float32{{0, 0, 0, 0}, {9, 9, 9, 9}, {1, 1, 1, 1}, {8, 8, 8, 8}}); err != nil {
+		t.Fatal(err)
+	}
+	v := []float32{5, 6, 7, 8}
+	res := ix.Add([][]float32{v})
+	if res[0].Handle.Hash != HashVec(v) {
+		t.Fatal("HashVec must equal the Handle.Hash the index assigned (so callers can build a fetch map)")
+	}
+}
+
 func TestHammingBytesCountsDifferingSubquantizers(t *testing.T) {
 	if g := hammingBytes([]uint8{1, 2, 3, 4}, []uint8{1, 9, 3, 9}); g != 2 {
 		t.Fatalf("hammingBytes = %d, want 2", g)

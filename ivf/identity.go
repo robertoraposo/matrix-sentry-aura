@@ -6,6 +6,11 @@ import (
 	"math"
 )
 
+// HashVec exposes the index's content-identity hash so a caller can key its own
+// originals store by the same value Add/Search put on Handle.Hash — e.g. to
+// build the fetch map SearchRerank reads. It is exactly the internal hashVec.
+func HashVec(v []float32) uint64 { return hashVec(v) }
+
 // hashVec is the FNV-1a hash of a vector's raw float32 bytes — an exact,
 // order-stable identity. Identical vectors hash identically; any differing
 // element changes the hash. This is the primary key of the identity ladder.

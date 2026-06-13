@@ -206,10 +206,25 @@ failures the diag isolated, with no resident/non-resident asymmetry to exploit o
 - Artifacts: `results/evolve-lmax2.0-final.json` + `.log` (repo); tesla `/tmp/evolve-out/`.
 - A confirmation run at a realistic budget (`-lmax-mult 1.3`, out `/tmp/evolve-13`) was launched on tesla.
 
+## ✅ CONFIG APPLIED TO PRODUCTION + loop-closed on the real ivf API (2026-06-13)
+
+- **1.3× confirmation run** (results/evolve-lmax1.3-*) cross-confirmed the frontier: every winning config
+  shares `M=96 + nprobe≈32 + exact re-rank` (K wanders 64/128/256 within the ~0.4pp holdout noise band).
+  Finalists worst-seed holdout: `64-96-128-32-200` 0.9855@1.49×, `64-96-64-32-400` 0.98525@1.23×,
+  **`64-96-64-32-200` 0.98475@1.18×** ← chosen (all-recall, cheapest; nominal champ wins by 0.08pp = noise).
+- **`ivf.Recommended(dim)`** is now the canonical source of truth (TDD): geometry `64-96-64` + search
+  `SearchParams{Nprobe:32, RerankK:200}`. The GA's non-obvious find: K=64 (cheaper, coarser PQ) beats
+  K=256 *because* the exact re-rank repairs the added quantization error. `ivf.SearchRerank` (production
+  path, TDD, fetch-by-Handle.Hash) + `ivf.HashVec` (build the originals fetch map) shipped.
+- **Loop closed (adversarial):** `cmd/ivfverify` builds through the PRODUCTION ivf API (New→Train→Add→
+  SearchRerank with ivf.Recommended) on the real 47k×768 set → recall@10 **0.9840** (matches the GA's
+  ~0.985 from lab.*; 0.1pp = noise). Proof the canonical config works in production code, not just the lab.
+  Output: results/ivfverify-production-path.txt.
+
 ## Pending / next steps (Alvin's queue)
-1. **Read `/tmp/evolve-13` result on tesla** (1.3×-budget GA run) → pick the production config; then
-   **apply the evolved config** (likely runner-up `32-96-256-16-100`) as the new default + wire the exact
-   re-rank stage into `ivf.Search`/`SearchTiered` production path (it lives only in the lab harness today).
+1. **Wire `ivf.Recommended` + `SearchRerank` into the MCP serving path** when `memory.recall` lands — the
+   config is codified and verified; it just needs a service to call it (the originals fetch can be the
+   CAS/registry). Until then `ivf.Recommended(768)` IS the applied production config.
 2. **Merge `feat/operational-cache`**, then `feat/evolve-tuner` (PR each).
 3. Wire the id-addressed serving path end-to-end: registry item id → Handle.Hash adapter so
    `cache.ExactTier` + `ivf.SearchTiered` serve `memory.recall`-by-path from RAM (the 140ns path).

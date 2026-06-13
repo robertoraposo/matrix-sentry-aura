@@ -1,0 +1,7 @@
+== ivfverify · N=47674 dim=768 queries=5000 (production ivf API) ==
+ivf.Recommended(768): nlist=64 M=96 K=64 · nprobe=32 rerankK=200
+build: 1m28.362s · Ntotal=47524
+
+== recall@10 (all 5000 queries, production path) ==
+  baseline Search(nprobe=16)             : 0.8660
+  Recommended SearchRerank(np=32,rr=200) : 0.9840  (+11.80pp)
