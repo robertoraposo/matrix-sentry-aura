@@ -105,11 +105,25 @@ func str(n *Node) string {
 	}
 	switch n.Op {
 	case Const:
-		return strconv.FormatFloat(n.Val, 'g', 4, 64)
+		return strconv.FormatFloat(n.Val, 'g', -1, 64)
 	case Var:
 		return "f" + strconv.Itoa(n.Idx)
 	}
-	sym := map[Op]string{Add: "+", Sub: "-", Mul: "*", Div: "/", Min: "min", Max: "max"}[n.Op]
+	var sym string
+	switch n.Op {
+	case Add:
+		sym = "+"
+	case Sub:
+		sym = "-"
+	case Mul:
+		sym = "*"
+	case Div:
+		sym = "/"
+	case Min:
+		sym = "min"
+	case Max:
+		sym = "max"
+	}
 	return "(" + sym + " " + str(n.L) + " " + str(n.R) + ")"
 }
 

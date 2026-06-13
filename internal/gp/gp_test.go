@@ -24,11 +24,13 @@ func TestProtectedDivision(t *testing.T) {
 }
 
 func TestEvalDeterministic(t *testing.T) {
-	rng := rand.New(rand.NewSource(7))
-	tr := randTree(rng, 0, 4, 4, false)
 	feats := []float64{1.5, 2.0, 0.3, 1.1}
-	if Eval(tr, feats) != Eval(tr, feats) {
-		t.Fatal("Eval not deterministic")
+	rng1 := rand.New(rand.NewSource(7))
+	rng2 := rand.New(rand.NewSource(7))
+	tr1 := randTree(rng1, 0, 4, 4, false)
+	tr2 := randTree(rng2, 0, 4, 4, false)
+	if Eval(tr1, feats) != Eval(tr2, feats) {
+		t.Fatal("randTree not deterministic for the same seed")
 	}
 }
 
