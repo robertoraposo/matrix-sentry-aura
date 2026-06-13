@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +66,27 @@ func randToken(nbytes int) string {
 		panic(err) // crypto/rand failure is unrecoverable
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// allowedRedirect is the redirect_uri allowlist that prevents authorization-code
+// theft: without it, an attacker who phishes the owner into approving a request
+// with their own PKCE pair could redirect the code to a site they control and
+// exchange it (PKCE alone doesn't help — the attacker generated the pair). We
+// allow only Anthropic's HTTPS callback hosts and loopback (RFC 8252) for local
+// MCP clients. Exact host match, no substring/suffix tricks, no userinfo.
+func allowedRedirect(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	host := u.Hostname()
+	if u.Scheme == "https" && (host == "claude.ai" || host == "claude.com") {
+		return true
+	}
+	if (u.Scheme == "http" || u.Scheme == "https") && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+		return true
+	}
+	return false
 }
 
 // verifyPKCE checks that S256(verifier) equals the stored challenge.
@@ -238,7 +260,9 @@ input,button{font-size:1rem;padding:.6rem;width:100%;box-sizing:border-box;margi
 button{background:#111;color:#fff;border:0;border-radius:.4rem;cursor:pointer}
 .c{color:#666;font-size:.9rem}</style></head>
 <body><h2>Authorize Claude to access Matrix Sentry</h2>
-<p class="c">A client wants to connect to your memory server. Enter your approval passphrase to allow it.</p>
+<p class="c">A client wants to connect to your memory server and will receive the
+authorization at:<br><b>{{.RedirectHost}}</b><br>Only continue if you recognize it.
+Enter your approval passphrase to allow it.</p>
 <form method="POST" action="/authorize">
 <input type="password" name="passphrase" placeholder="approval passphrase" autofocus required>
 <input type="hidden" name="response_type" value="{{.ResponseType}}">
@@ -258,12 +282,24 @@ func (o *oauthProvider) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	r.ParseForm()
 	get := func(k string) string { return r.Form.Get(k) }
 
+	// Reject a bad redirect_uri up front (both GET and POST) so a malicious one
+	// never reaches the consent form or a code.
+	if ru := get("redirect_uri"); ru == "" || !allowedRedirect(ru) {
+		http.Error(w, "invalid_request: redirect_uri not allowed", http.StatusBadRequest)
+		return
+	}
+
 	if r.Method == http.MethodGet {
+		rh := ""
+		if u, err := url.Parse(get("redirect_uri")); err == nil {
+			rh = u.Hostname()
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		consentTmpl.Execute(w, map[string]string{
 			"ResponseType":        get("response_type"),
 			"ClientID":            get("client_id"),
 			"RedirectURI":         get("redirect_uri"),
+			"RedirectHost":        rh,
 			"CodeChallenge":       get("code_challenge"),
 			"CodeChallengeMethod": get("code_challenge_method"),
 			"State":               get("state"),
@@ -275,8 +311,8 @@ func (o *oauthProvider) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	// POST: validate consent passphrase, then issue an authorization code.
 	redirectURI := get("redirect_uri")
 	challenge := get("code_challenge")
-	if redirectURI == "" || challenge == "" || get("code_challenge_method") != "S256" {
-		http.Error(w, "invalid_request: PKCE S256 + redirect_uri required", http.StatusBadRequest)
+	if challenge == "" || get("code_challenge_method") != "S256" {
+		http.Error(w, "invalid_request: PKCE S256 required", http.StatusBadRequest)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(get("passphrase")), []byte(o.approveSecret)) != 1 {
@@ -289,15 +325,19 @@ func (o *oauthProvider) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		clientID: get("client_id"), redirectURI: redirectURI,
 		codeChallenge: challenge, scope: get("scope"),
 	})
-	sep := "?"
-	if strings.Contains(redirectURI, "?") {
-		sep = "&"
+	// Build the redirect with proper URL encoding, preserving any existing query.
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		http.Error(w, "invalid_request: bad redirect_uri", http.StatusBadRequest)
+		return
 	}
-	loc := fmt.Sprintf("%s%scode=%s", redirectURI, sep, code)
+	q := u.Query()
+	q.Set("code", code)
 	if st := get("state"); st != "" {
-		loc += "&state=" + st
+		q.Set("state", st)
 	}
-	http.Redirect(w, r, loc, http.StatusFound)
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
 // --- token ---
@@ -316,6 +356,11 @@ func (o *oauthProvider) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 		if c.redirectURI != "" && r.Form.Get("redirect_uri") != c.redirectURI {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "redirect_uri mismatch"})
+			return
+		}
+		// Bind the code to the client it was issued to (RFC 6749 §4.1.3).
+		if c.clientID != "" && r.Form.Get("client_id") != c.clientID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "client_id mismatch"})
 			return
 		}
 		if !verifyPKCE(r.Form.Get("code_verifier"), c.codeChallenge) {

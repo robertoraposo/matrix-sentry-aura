@@ -311,3 +311,93 @@ func TestMCPAuthAcceptsStaticAndOAuthAndChallenges(t *testing.T) {
 		t.Fatalf("bad token status %d, want 401", rec.Code)
 	}
 }
+
+func TestAuthorizeRejectsUnregisteredRedirect(t *testing.T) {
+	o := newTestOAuth()
+	form := url.Values{
+		"response_type": {"code"}, "client_id": {"c"},
+		"redirect_uri":          {"https://evil.example.com/steal"},
+		"code_challenge":        {"ch"}, "code_challenge_method": {"S256"},
+		"state": {"s"}, "passphrase": {testSecret}, // correct passphrase!
+	}
+	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	o.handleAuthorize(rec, req)
+	if rec.Code == http.StatusFound {
+		t.Fatalf("issued a code to an unregistered redirect_uri (auth-code theft): %s", rec.Header().Get("Location"))
+	}
+}
+
+func TestAllowedRedirect(t *testing.T) {
+	ok := []string{
+		"https://claude.ai/api/mcp/auth_callback",
+		"https://claude.com/api/mcp/auth_callback",
+		"http://localhost:8976/callback",
+		"http://127.0.0.1:53/cb",
+	}
+	bad := []string{
+		"https://evil.com/cb",
+		"https://claude.ai.evil.com/cb",
+		"http://evil.com/cb",
+		"https://notclaude.ai/cb",
+		"ftp://localhost/x",
+		"",
+		"https://claude.ai@evil.com/cb",
+	}
+	for _, u := range ok {
+		if !allowedRedirect(u) {
+			t.Errorf("should allow %q", u)
+		}
+	}
+	for _, u := range bad {
+		if allowedRedirect(u) {
+			t.Errorf("should reject %q", u)
+		}
+	}
+}
+
+func TestTokenBindsClientID(t *testing.T) {
+	o := newTestOAuth()
+	code := o.issueCode(authCode{clientID: "clientA", redirectURI: "https://claude.ai/cb", codeChallenge: "ch"})
+	form := url.Values{
+		"grant_type": {"authorization_code"}, "code": {code},
+		"redirect_uri": {"https://claude.ai/cb"}, "client_id": {"clientB"}, // mismatched
+		"code_verifier": {"whatever"},
+	}
+	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	o.handleToken(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatal("token issued despite client_id mismatch (code not bound to client)")
+	}
+}
+
+func TestRedirectEncodesStateAndCode(t *testing.T) {
+	o := newTestOAuth()
+	verifier := "abc123abc123abc123abc123abc123abc123abc123ZZ"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	form := url.Values{
+		"response_type": {"code"}, "client_id": {"c1"},
+		"redirect_uri":          {"https://claude.ai/api/mcp/auth_callback"},
+		"code_challenge":        {challenge}, "code_challenge_method": {"S256"},
+		"state":      {"a b&c=d"}, // needs encoding
+		"passphrase": {testSecret},
+	}
+	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	o.handleAuthorize(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status %d", rec.Code)
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("redirect not a valid URL: %v", err)
+	}
+	if loc.Query().Get("state") != "a b&c=d" {
+		t.Fatalf("state not round-tripped through encoding: %q", loc.Query().Get("state"))
+	}
+}
