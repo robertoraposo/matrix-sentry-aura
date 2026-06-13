@@ -269,6 +269,36 @@ slow/down; 5s timeout; synchronous so stdout injects). Activates on the NEXT ses
 are automatic: passive capture (record_access) + active injection (recall). Next: improve the recall query
 (git remote/README beats cwd basename — distances cluster, ordering is imperfect).
 
+## ✅ AUTO-REMEMBER LIVE — the third leg is now automatic (2026-06-13)
+
+The last manual leg is closed: `remember` now grows the corpus on its own. Design = agent **self-report**
+(reuses the running model's judgment — no lexical classifier, no extra generative model), fired on an
+**activity threshold**, with **defense-in-depth anti-noise** (reflection prompt recalls first + server
+deduplicates). Built TDD, two-stage reviewed (spec + quality), all on `main`, 0 fails.
+
+- **Decided with data first.** `cmd/reflectyield` segmented 36 real transcripts into K-tool-use windows;
+  labeling measured **47–60% of windows contain ≥1 durable fact** (gate was ≥10% → strong GO). Yield is
+  flat across K (windows are fact-dense), so K is set by interruption cost: **K=40** (~1.7 reflections/
+  session). Finding: `results/auto-remember-yield.md`.
+- **`internal/transcript`** — shared parser (tool-use count + windows). The hook and the calibration count
+  tool-uses through the SAME code, so the calibrated K is valid for the hook.
+- **`cmd/sentry-reflect`** — Stop hook. Every 40 new tool-uses it returns `{"decision":"block","reason":…}`
+  telling the agent to distill durable knowledge (decisions/conventions/gotchas) via recall→remember, terse,
+  no transient state. Best-effort (any error → exit 0), no-op without `SENTRY_MCP_URL`, `stop_hook_active`
+  loop guard. Installed `~/.local/bin/sentry-reflect`, registered **Stop** hook (`async:false`) in
+  `~/.claude/settings.json` — GLOBAL, so it nudges reflection in every project.
+- **Server dedup** — `memory.Store.Remember` gained a novelty gate (`DedupThreshold`, squared-L2, tenant-
+  scoped, returns `deduped`); `cmd/sentrymcp` exposes `-dedup-tau`/`SENTRY_DEDUP_TAU` and the `remember`
+  tool reports "already known as memory #N (deduped)". **τ=0.85** calibrated by `cmd/tauprobe` against the
+  real embedder (paraphrase max 0.667 < 0.85 < distinct min 1.238). Deployed: VM env `SENTRY_DEDUP_TAU=0.85`,
+  sentrymcp redeployed (prev `/root/sentrymcp.bak`), `systemctl is-active` = active.
+- **Verified live (zero pollution):** recalled memory #20 verbatim, re-`remember`ed it → server replied
+  "already known as memory #20 (deduped, not stored again)" — embed → scan real corpus → dedup hit, nothing
+  stored. The full self-referential cycle (capture access / inject at start / distill while working) now runs
+  with no manual step.
+- **Rollback:** remove the `Stop` block from `~/.claude/settings.json`; on the VM `mv /root/sentrymcp.bak
+  /root/sentrymcp && systemctl restart sentrymcp` and drop `SENTRY_DEDUP_TAU`.
+
 ## Pending / next steps (Alvin's queue)
 1. **Disable Bot Fight Mode** for the zone before relying on the claude.ai web connector.
 2. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
