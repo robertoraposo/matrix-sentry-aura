@@ -100,9 +100,10 @@ const reflectionPrompt = "Pause before finishing. Reflect on the work since your
 	"If — and only if — you learned durable knowledge (a decision made, a convention adopted, a gotcha " +
 	"discovered) that a future session would benefit from, persist it: first call the recall tool to avoid " +
 	"duplicating what is already stored, then call the remember tool once per genuinely-new fact, each fact " +
-	"self-contained and concise. Do NOT store transient state, file contents, task progress, or anything " +
-	"already in the code or git. If nothing durable was learned, store nothing. Be terse — do not narrate " +
-	"this to the user. Then finish."
+	"self-contained and concise. If recall surfaces a memory that is now outdated or wrong, call remember " +
+	"with supersedes set to that memory's id to replace it instead of storing a contradicting duplicate. " +
+	"Do NOT store transient state, file contents, task progress, or anything already in the code or git. " +
+	"If nothing durable was learned, store nothing. Be terse — do not narrate this to the user. Then finish."
 
 // decide computes the hook's action against an explicit transcript + state dir.
 // Returns the stdout to emit (empty if none) and whether it fired. Pure w.r.t.

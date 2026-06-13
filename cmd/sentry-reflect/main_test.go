@@ -117,3 +117,13 @@ func TestDecideFiresOncePerWindow(t *testing.T) {
 		t.Fatalf("loop guard failed: fired with stop_hook_active")
 	}
 }
+
+func TestReflectionPromptAdvertisesSupersede(t *testing.T) {
+	// The prompt must tell the agent to update stale memories via supersedes,
+	// not just store new ones — this is what closes the truth-blind-dedup gap.
+	for _, want := range []string{"recall", "remember", "supersedes"} {
+		if !strings.Contains(reflectionPrompt, want) {
+			t.Fatalf("reflectionPrompt missing %q", want)
+		}
+	}
+}
