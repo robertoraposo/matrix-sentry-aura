@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +75,35 @@ func TestParseHook(t *testing.T) {
 	}
 	if h.SessionID != "s1" || h.TranscriptPath != "/t.jsonl" || !h.StopHookActive || h.Cwd != "/w" {
 		t.Fatalf("parsed hook wrong: %+v", h)
+	}
+}
+
+// decide drives the hook's decision logic the way main() does, but against an
+// explicit transcript + state dir so it is deterministic and offline.
+func TestDecideFiresOncePerWindow(t *testing.T) {
+	dir := t.TempDir()
+	// transcript with 2 tool_use blocks
+	tf := dir + "/t.jsonl"
+	os.WriteFile(tf, []byte(
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"},{"type":"tool_use","name":"Bash"}]}}`+"\n"), 0o644)
+
+	// k=2, fresh session -> should fire and persist count=2
+	out, fired := decide(hookInput{SessionID: "s1", TranscriptPath: tf}, dir, 2)
+	if !fired {
+		t.Fatalf("expected fire on delta=2 k=2")
+	}
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Fatalf("fire output not a block decision: %q", out)
+	}
+	// immediately again, same transcript -> delta=0 -> no fire
+	_, fired2 := decide(hookInput{SessionID: "s1", TranscriptPath: tf}, dir, 2)
+	if fired2 {
+		t.Fatalf("should not re-fire when no new activity")
+	}
+	// loop guard: stop_hook_active true never fires even past threshold
+	os.WriteFile(dir+"/s2", []byte("0"), 0o644)
+	_, fired3 := decide(hookInput{SessionID: "s2", TranscriptPath: tf, StopHookActive: true}, dir, 2)
+	if fired3 {
+		t.Fatalf("loop guard failed: fired with stop_hook_active")
 	}
 }

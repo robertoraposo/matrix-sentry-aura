@@ -15,10 +15,13 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"matrixsentry/internal/transcript"
 )
 
 // reflectEvery is the activity threshold (tool-uses per reflection). Set from
@@ -85,4 +88,95 @@ func writeCount(dir, sid string, n int) error {
 func blockOutput(reason string) string {
 	b, _ := json.Marshal(map[string]any{"decision": "block", "reason": reason})
 	return string(b)
+}
+
+// reflectionPrompt is the instruction injected as the Stop "reason". It mirrors
+// the project's memory guidance: durable knowledge only, dedup first, be terse.
+const reflectionPrompt = "Pause before finishing. Reflect on the work since your last memory checkpoint. " +
+	"If — and only if — you learned durable knowledge (a decision made, a convention adopted, a gotcha " +
+	"discovered) that a future session would benefit from, persist it: first call the recall tool to avoid " +
+	"duplicating what is already stored, then call the remember tool once per genuinely-new fact, each fact " +
+	"self-contained and concise. Do NOT store transient state, file contents, task progress, or anything " +
+	"already in the code or git. If nothing durable was learned, store nothing. Be terse — do not narrate " +
+	"this to the user. Then finish."
+
+// decide computes the hook's action against an explicit transcript + state dir.
+// Returns the stdout to emit (empty if none) and whether it fired. Pure w.r.t.
+// the network; main() adds config gating around it.
+func decide(h hookInput, stateDirPath string, k int) (string, bool) {
+	f, err := os.Open(h.TranscriptPath)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	current, err := transcript.CountToolUses(f)
+	if err != nil {
+		return "", false
+	}
+	stored := readCount(stateDirPath, h.SessionID)
+	if !shouldReflect(current-stored, k, h.StopHookActive) {
+		return "", false
+	}
+	_ = writeCount(stateDirPath, h.SessionID, current)
+	return blockOutput(reflectionPrompt), true
+}
+
+type config struct{ url, token string }
+
+func loadConfig() config {
+	c := config{url: os.Getenv("SENTRY_MCP_URL"), token: os.Getenv("SENTRY_MCP_TOKEN")}
+	if c.url == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			loadEnvFile(filepath.Join(home, ".matrix-sentry.env"), &c)
+		}
+	}
+	return c
+}
+
+func loadEnvFile(path string, c *config) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, ln := range strings.Split(string(data), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(ln, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		switch key {
+		case "SENTRY_MCP_URL":
+			if c.url == "" {
+				c.url = val
+			}
+		case "SENTRY_MCP_TOKEN":
+			if c.token == "" {
+				c.token = val
+			}
+		}
+	}
+}
+
+func main() {
+	// Best-effort: any problem -> clean exit 0, no output, the stop proceeds.
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+	if err != nil {
+		return
+	}
+	h, err := parseHook(raw)
+	if err != nil {
+		return
+	}
+	// No memory server configured -> remember would fail; do not nudge.
+	if loadConfig().url == "" {
+		return
+	}
+	if out, fired := decide(h, stateDir(), reflectEvery); fired {
+		os.Stdout.WriteString(out)
+	}
 }
