@@ -96,6 +96,9 @@ func New(journal *sentry.Store, embed Embedder) (*Store, error) {
 		if p.ID >= s.nextID {
 			s.nextID = p.ID + 1
 		}
+		// A superseding record always has a higher id than the record it
+		// supersedes (ids are monotonic, assigned after the superseded one), so
+		// the target is already in s.entries by the time we replay this record.
 		if p.Supersedes != 0 {
 			s.dropEntry(r.Tenant, p.Supersedes)
 		}
@@ -112,6 +115,7 @@ func New(journal *sentry.Store, embed Embedder) (*Store, error) {
 
 // dropEntry removes the in-RAM entry for (tenant, id) if present. The journal
 // record is untouched — only the live index (current truth) drops the id.
+// Caller holds s.mu (or, in New, the store is not yet shared).
 func (s *Store) dropEntry(tenant sentry.TenantID, id uint64) {
 	for i := range s.entries {
 		if s.entries[i].tenant == tenant && s.entries[i].mem.ID == id {
