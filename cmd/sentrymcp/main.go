@@ -301,9 +301,10 @@ func toolList() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"text": map[string]any{"type": "string", "description": "the memory to store (a fact, decision, or piece of context)"},
-					"tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional labels for grouping/filtering"},
-					"src":  map[string]any{"type": "string", "description": "optional originating tool or context"},
+					"text":       map[string]any{"type": "string", "description": "the memory to store (a fact, decision, or piece of context)"},
+					"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional labels for grouping/filtering"},
+					"src":        map[string]any{"type": "string", "description": "optional originating tool or context"},
+					"supersedes": map[string]any{"type": "integer", "description": "optional id of an existing memory this fact updates or corrects; replaces it instead of storing a contradicting duplicate"},
 				},
 				"required": []any{"text"},
 			},
@@ -393,17 +394,24 @@ func (s *server) callTool(req rpcReq) rpcResp {
 		}
 		src, _ := strArg(p.Args, "src")
 		tags := stringsArg(p.Args, "tags")
+		supersedes := uintArg(p.Args, "supersedes")
 		s.mu.Lock()
-		id, deduped, err := s.mem.Remember(s.tenant, text, tags, src)
+		id, deduped, superseded, err := s.mem.Remember(s.tenant, text, tags, src, supersedes)
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "remember failed: "+err.Error())
 		}
-		s.moko.Info("remember", map[string]string{"tenant": fmt.Sprint(s.tenant), "id": fmt.Sprint(id), "tags": fmt.Sprint(tags), "len": fmt.Sprint(len(text)), "deduped": fmt.Sprint(deduped)})
-		if deduped {
+		s.moko.Info("remember", map[string]string{"tenant": fmt.Sprint(s.tenant), "id": fmt.Sprint(id), "tags": fmt.Sprint(tags), "len": fmt.Sprint(len(text)), "deduped": fmt.Sprint(deduped), "superseded": fmt.Sprint(superseded)})
+		switch {
+		case superseded != 0:
+			return s.toolText(req.ID, fmt.Sprintf("remembered as memory #%d, superseding #%d", id, superseded))
+		case deduped:
 			return s.toolText(req.ID, fmt.Sprintf("already known as memory #%d (deduped, not stored again)", id))
+		case supersedes != 0:
+			return s.toolText(req.ID, fmt.Sprintf("superseded id #%d not found for this tenant; remembered as memory #%d", supersedes, id))
+		default:
+			return s.toolText(req.ID, fmt.Sprintf("remembered as memory #%d", id))
 		}
-		return s.toolText(req.ID, fmt.Sprintf("remembered as memory #%d", id))
 	case "recall":
 		if s.mem == nil {
 			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
@@ -508,6 +516,22 @@ func strArg(args map[string]any, key string) (string, bool) {
 	}
 	s, ok := v.(string)
 	return s, ok
+}
+
+// uintArg reads a non-negative integer arg. JSON numbers arrive as float64 in a
+// map[string]any; a json.Number is handled defensively. Missing/invalid -> 0.
+func uintArg(args map[string]any, key string) uint64 {
+	switch v := args[key].(type) {
+	case float64:
+		if v > 0 {
+			return uint64(v)
+		}
+	case json.Number:
+		if n, err := v.Int64(); err == nil && n > 0 {
+			return uint64(n)
+		}
+	}
+	return 0
 }
 
 // pathArgs collects file paths from either the single 'path' arg or the 'paths'
