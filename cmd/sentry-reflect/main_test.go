@@ -49,6 +49,16 @@ func TestStateRoundTrip(t *testing.T) {
 	if matches, _ := filepath.Glob(filepath.Join(dir, "*")); len(matches) == 0 {
 		t.Fatalf("sanitized state file not written inside dir")
 	}
+	// "../escape" sanitizes to a single safe name inside dir (sessA + .._escape)
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*")); len(matches) != 2 {
+		t.Fatalf("expected 2 state files inside dir, got %v", matches)
+	}
+	// ".." and "." must not collapse to the dir itself (would break the counter)
+	for _, bad := range []string{"..", ".", ""} {
+		if got := safeName(bad); got == "/" || got == "." || got == "" {
+			t.Fatalf("safeName(%q) = %q, would write to the state dir itself", bad, got)
+		}
+	}
 }
 
 func TestBlockOutputIsValidDecision(t *testing.T) {

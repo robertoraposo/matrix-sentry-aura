@@ -63,7 +63,11 @@ func safeName(sid string) string {
 	if sid == "" {
 		return "default"
 	}
-	return filepath.Base(filepath.Clean("/" + strings.ReplaceAll(sid, string(os.PathSeparator), "_")))
+	name := filepath.Base(filepath.Clean("/" + strings.ReplaceAll(sid, string(os.PathSeparator), "_")))
+	if name == "/" || name == "." || name == "" {
+		return "default"
+	}
+	return name
 }
 
 func readCount(dir, sid string) int {
@@ -121,10 +125,13 @@ func decide(h hookInput, stateDirPath string, k int) (string, bool) {
 	return blockOutput(reflectionPrompt), true
 }
 
-type config struct{ url, token string }
+type config struct{ url string }
 
+// loadConfig reads SENTRY_MCP_URL from the environment, falling back to
+// ~/.matrix-sentry.env. This hook makes no network call — it only needs the URL
+// to decide whether the memory server is configured (else it is a no-op).
 func loadConfig() config {
-	c := config{url: os.Getenv("SENTRY_MCP_URL"), token: os.Getenv("SENTRY_MCP_TOKEN")}
+	c := config{url: os.Getenv("SENTRY_MCP_URL")}
 	if c.url == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			loadEnvFile(filepath.Join(home, ".matrix-sentry.env"), &c)
@@ -153,10 +160,6 @@ func loadEnvFile(path string, c *config) {
 		case "SENTRY_MCP_URL":
 			if c.url == "" {
 				c.url = val
-			}
-		case "SENTRY_MCP_TOKEN":
-			if c.token == "" {
-				c.token = val
 			}
 		}
 	}
