@@ -59,6 +59,7 @@ type server struct {
 	store  *sentry.Store
 	reg    *sentry.Registry // path→id dictionary for real (file-path) accesses
 	mem    *memory.Store    // semantic memory (nil when no embedder is configured)
+	oauth  *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
 	moko   *mokoblinks.Client
 	tenant sentry.TenantID
 	token  string // optional bearer auth for HTTP transport
@@ -68,6 +69,7 @@ func main() {
 	dir := flag.String("dir", "/var/lib/matrix-sentry", "journal directory")
 	tenant := flag.Int("tenant", 1, "default tenant id for this agent")
 	httpAddr := flag.String("http", "", "listen address for remote Streamable HTTP (e.g. 0.0.0.0:8808); empty = stdio")
+	oauthIssuer := flag.String("oauth-issuer", envOr("SENTRY_OAUTH_ISSUER", ""), "public base URL (e.g. https://mcp.example.com) to enable native OAuth for claude.ai connectors; empty = static bearer only")
 	ollamaURL := flag.String("ollama", envOr("SENTRY_OLLAMA_URL", ""), "Ollama base URL for embeddings (enables remember/recall); empty = memory tools disabled")
 	embedModel := flag.String("embed-model", envOr("SENTRY_EMBED_MODEL", "nomic-embed-text"), "embedding model name")
 	embedDim := flag.Int("embed-dim", 768, "embedding dimension (nomic-embed-text = 768)")
@@ -101,6 +103,19 @@ func main() {
 		}
 		s.mem = mem
 		moko.Info("semantic memory enabled", map[string]string{"ollama": *ollamaURL, "model": *embedModel, "dim": fmt.Sprint(*embedDim)})
+	}
+
+	// Native OAuth for claude.ai connectors: enabled when an issuer URL is set.
+	// The approval passphrase is the existing SENTRY_MCP_TOKEN, so the owner
+	// already holds it. Requires HTTP transport.
+	if *oauthIssuer != "" {
+		secret := os.Getenv("SENTRY_MCP_TOKEN")
+		if secret == "" {
+			fmt.Fprintln(os.Stderr, "sentrymcp: -oauth-issuer requires SENTRY_MCP_TOKEN (used as the consent passphrase + signing key)")
+			os.Exit(1)
+		}
+		s.oauth = newOAuth(*oauthIssuer, secret)
+		moko.Info("native OAuth enabled", map[string]string{"issuer": *oauthIssuer})
 	}
 
 	if *httpAddr != "" {
@@ -139,6 +154,17 @@ func (s *server) serveStdio() {
 func (s *server) serveHTTP(addr string) {
 	s.token = os.Getenv("SENTRY_MCP_TOKEN") // optional bearer auth
 	mux := http.NewServeMux()
+	if s.oauth != nil {
+		// OAuth discovery + endpoints (served at the public issuer root).
+		mux.HandleFunc("/.well-known/oauth-protected-resource", s.oauth.handleProtectedResource)
+		mux.HandleFunc("/.well-known/oauth-authorization-server", s.oauth.handleAuthServerMeta)
+		// Some MCP clients append the resource path to the discovery URL.
+		mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", s.oauth.handleProtectedResource)
+		mux.HandleFunc("/.well-known/oauth-authorization-server/mcp", s.oauth.handleAuthServerMeta)
+		mux.HandleFunc("/register", s.oauth.handleRegister)
+		mux.HandleFunc("/authorize", s.oauth.handleAuthorize)
+		mux.HandleFunc("/token", s.oauth.handleToken)
+	}
 	mux.HandleFunc("/", s.handleHTTP)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "sentrymcp http: %v\n", err)
@@ -146,10 +172,31 @@ func (s *server) serveHTTP(addr string) {
 	}
 }
 
+// authorized reports whether the request carries a valid credential: the static
+// bearer token (Claude Code) OR a valid OAuth access token (claude.ai). When no
+// auth is configured at all, requests are allowed (local/dev).
+func (s *server) authorized(r *http.Request) bool {
+	auth := r.Header.Get("Authorization")
+	if s.token != "" && auth == "Bearer "+s.token {
+		return true
+	}
+	if s.oauth != nil && strings.HasPrefix(auth, "Bearer ") {
+		if _, ok := s.oauth.verifyToken(strings.TrimPrefix(auth, "Bearer "), "access"); ok {
+			return true
+		}
+	}
+	return s.token == "" && s.oauth == nil
+}
+
 func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Ship any buffered MokoBlinks lines after every request so the live log
 	// mirror stays current under low volume (batch flush alone would not fire).
 	defer func() { go s.moko.Flush() }()
+
+	// CORS for the browser-based claude.ai connector (also answers preflight).
+	if s.oauth != nil && s.oauth.cors(w, r) {
+		return
+	}
 
 	if r.Method == http.MethodGet && r.URL.Path == "/" {
 		fmt.Fprintln(w, "matrix-sentry mcp ok")
@@ -159,7 +206,10 @@ func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "use POST /mcp", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.token != "" && r.Header.Get("Authorization") != "Bearer "+s.token {
+	if !s.authorized(r) {
+		if s.oauth != nil {
+			w.Header().Set("WWW-Authenticate", s.oauth.wwwAuthenticate())
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
