@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"matrixsentry/memory"
 	"matrixsentry/mokoblinks"
 	"matrixsentry/sentry"
 )
@@ -133,5 +134,103 @@ func TestRecordAccessByItemBackCompat(t *testing.T) {
 	items := accessItems(t, s)
 	if len(items) != 1 || items[0].ItemID != 5 {
 		t.Errorf("expected single access item 5, got %+v", items)
+	}
+}
+
+// --- semantic memory tools ---
+
+// testEmbedder is a tiny 2-D embedder: known words map to fixed points so the
+// recall ordering is deterministic; unknown text lands far away.
+type testEmbedder struct{}
+
+func (testEmbedder) Dim() int { return 2 }
+func (testEmbedder) Embed(texts []string) ([][]float32, error) {
+	pts := map[string][]float32{
+		"prefer tabs over spaces": {0, 0},
+		"indentation style":       {0.1, 0},
+		"deploy on fridays":       {9, 9},
+	}
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		if v, ok := pts[t]; ok {
+			out[i] = v
+		} else {
+			out[i] = []float32{5, 5}
+		}
+	}
+	return out, nil
+}
+
+func newMemServer(t *testing.T) *server {
+	t.Helper()
+	s := newTestServer(t)
+	mem, err := memory.New(s.store, testEmbedder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mem = mem
+	return s
+}
+
+func callNamed(s *server, name string, args map[string]any) rpcResp {
+	params, _ := json.Marshal(map[string]any{"name": name, "arguments": args})
+	return s.callTool(rpcReq{ID: json.RawMessage("1"), Params: params})
+}
+
+func TestRememberThenRecall(t *testing.T) {
+	s := newMemServer(t)
+	respText(t, callNamed(s, "remember", map[string]any{"text": "prefer tabs over spaces", "tags": []any{"style"}}))
+	respText(t, callNamed(s, "remember", map[string]any{"text": "deploy on fridays"}))
+
+	txt := respText(t, callNamed(s, "recall", map[string]any{"query": "indentation style", "k": float64(2)}))
+	if !strings.Contains(txt, "prefer tabs over spaces") {
+		t.Fatalf("recall did not surface the relevant memory: %q", txt)
+	}
+	// nearest must come before the far one
+	if i, j := strings.Index(txt, "tabs"), strings.Index(txt, "fridays"); i == -1 || (j != -1 && i > j) {
+		t.Fatalf("recall ordering wrong: %q", txt)
+	}
+}
+
+func TestRememberRequiresText(t *testing.T) {
+	s := newMemServer(t)
+	r := callNamed(s, "remember", map[string]any{})
+	m := r.Result.(map[string]any)
+	if m["isError"] != true {
+		t.Fatalf("remember without text should error, got %#v", m)
+	}
+}
+
+func TestMemoryToolsErrorWithoutEmbedder(t *testing.T) {
+	s := newTestServer(t) // s.mem stays nil (no -ollama configured)
+	for _, name := range []string{"remember", "recall"} {
+		r := callNamed(s, name, map[string]any{"text": "x", "query": "x"})
+		m := r.Result.(map[string]any)
+		if m["isError"] != true {
+			t.Fatalf("%s without embedder must error clearly, got %#v", name, m)
+		}
+		if !strings.Contains(m["content"].([]map[string]any)[0]["text"].(string), "embed") {
+			t.Fatalf("%s error should mention embeddings: %#v", name, m["content"])
+		}
+	}
+}
+
+func TestRecallReportsEmptyStore(t *testing.T) {
+	s := newMemServer(t)
+	txt := respText(t, callNamed(s, "recall", map[string]any{"query": "anything"}))
+	if !strings.Contains(strings.ToLower(txt), "no ") && !strings.Contains(txt, "0") {
+		t.Fatalf("empty recall should say so, got %q", txt)
+	}
+}
+
+func TestMemoryToolsListed(t *testing.T) {
+	names := map[string]bool{}
+	for _, tl := range toolList() {
+		names[tl["name"].(string)] = true
+	}
+	for _, want := range []string{"remember", "recall"} {
+		if !names[want] {
+			t.Fatalf("tool %q not advertised in tools/list", want)
+		}
 	}
 }

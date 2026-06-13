@@ -23,9 +23,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"matrixsentry/memory"
 	"matrixsentry/mokoblinks"
 	"matrixsentry/sentry"
 	"matrixsentry/sentry/access"
@@ -56,6 +58,7 @@ type server struct {
 	mu     sync.Mutex // serializes Append-bearing tool calls deterministically
 	store  *sentry.Store
 	reg    *sentry.Registry // path→id dictionary for real (file-path) accesses
+	mem    *memory.Store    // semantic memory (nil when no embedder is configured)
 	moko   *mokoblinks.Client
 	tenant sentry.TenantID
 	token  string // optional bearer auth for HTTP transport
@@ -65,6 +68,9 @@ func main() {
 	dir := flag.String("dir", "/var/lib/matrix-sentry", "journal directory")
 	tenant := flag.Int("tenant", 1, "default tenant id for this agent")
 	httpAddr := flag.String("http", "", "listen address for remote Streamable HTTP (e.g. 0.0.0.0:8808); empty = stdio")
+	ollamaURL := flag.String("ollama", envOr("SENTRY_OLLAMA_URL", ""), "Ollama base URL for embeddings (enables remember/recall); empty = memory tools disabled")
+	embedModel := flag.String("embed-model", envOr("SENTRY_EMBED_MODEL", "nomic-embed-text"), "embedding model name")
+	embedDim := flag.Int("embed-dim", 768, "embedding dimension (nomic-embed-text = 768)")
 	flag.Parse()
 
 	store, err := sentry.Open(*dir, sentry.Options{FsyncEvery: 75 * time.Millisecond})
@@ -82,6 +88,20 @@ func main() {
 
 	moko := mokoblinks.FromEnv()
 	s := &server{store: store, reg: reg, moko: moko, tenant: sentry.TenantID(*tenant)}
+
+	// Semantic memory is enabled only when an embedder is configured. Without
+	// -ollama the journal/telemetry tools still work; remember/recall report
+	// that embeddings are not configured rather than failing opaquely.
+	if *ollamaURL != "" {
+		emb := memory.NewOllamaEmbedder(*ollamaURL, *embedModel, *embedDim)
+		mem, err := memory.New(store, emb)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sentrymcp: init semantic memory: %v\n", err)
+			os.Exit(1)
+		}
+		s.mem = mem
+		moko.Info("semantic memory enabled", map[string]string{"ollama": *ollamaURL, "model": *embedModel, "dim": fmt.Sprint(*embedDim)})
+	}
 
 	if *httpAddr != "" {
 		moko.Info("sentrymcp listening (http)", map[string]string{"addr": *httpAddr, "dir": *dir, "tenant": fmt.Sprint(*tenant)})
@@ -223,6 +243,31 @@ func toolList() []map[string]any {
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
+			"name":        "remember",
+			"description": "Store a durable memory so future sessions (this agent or another model) can recall it semantically. Use for decisions, conventions, gotchas, and context worth surviving a context reset. The text is embedded and indexed; recall finds it by meaning, not keywords.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"text": map[string]any{"type": "string", "description": "the memory to store (a fact, decision, or piece of context)"},
+					"tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional labels for grouping/filtering"},
+					"src":  map[string]any{"type": "string", "description": "optional originating tool or context"},
+				},
+				"required": []any{"text"},
+			},
+		},
+		{
+			"name":        "recall",
+			"description": "Retrieve the memories most semantically relevant to a query, so the agent can recover context it stored earlier instead of starting from amnesia. Returns the closest matches ranked by similarity.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string", "description": "what you want to remember about"},
+					"k":     map[string]any{"type": "integer", "description": "max results to return (default 5)"},
+				},
+				"required": []any{"query"},
+			},
+		},
+		{
 			"name":        "stats",
 			"description": "Return how many events are stored in the journal.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
@@ -285,11 +330,93 @@ func (s *server) callTool(req rpcReq) rpcResp {
 		return s.toolText(req.ID, fmt.Sprintf(
 			"access analysis (tenant %d): total=%d  markovHit=%.1f%%  marginalHit=%.1f%%  LIFT=%.1f%%  coverage=%.1f%%\n%s",
 			s.tenant, rep.Total, rep.MarkovHit*100, rep.MarginalHit*100, rep.Lift*100, rep.Coverage*100, liftVerdict(rep.Lift)))
+	case "remember":
+		if s.mem == nil {
+			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
+		}
+		text, _ := strArg(p.Args, "text")
+		if text == "" {
+			return s.toolErr(req.ID, "provide 'text' to remember")
+		}
+		src, _ := strArg(p.Args, "src")
+		tags := stringsArg(p.Args, "tags")
+		s.mu.Lock()
+		id, err := s.mem.Remember(s.tenant, text, tags, src)
+		s.mu.Unlock()
+		if err != nil {
+			return s.toolErr(req.ID, "remember failed: "+err.Error())
+		}
+		s.moko.Info("remember", map[string]string{"tenant": fmt.Sprint(s.tenant), "id": fmt.Sprint(id), "tags": fmt.Sprint(tags), "len": fmt.Sprint(len(text))})
+		return s.toolText(req.ID, fmt.Sprintf("remembered as memory #%d", id))
+	case "recall":
+		if s.mem == nil {
+			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
+		}
+		query, _ := strArg(p.Args, "query")
+		if query == "" {
+			return s.toolErr(req.ID, "provide 'query' to recall")
+		}
+		k := 5
+		if v, ok := numArg(p.Args, "k"); ok && int(v) > 0 {
+			k = int(v)
+		}
+		hits, err := s.mem.Recall(s.tenant, query, k)
+		if err != nil {
+			return s.toolErr(req.ID, "recall failed: "+err.Error())
+		}
+		s.moko.Info("recall", map[string]string{"tenant": fmt.Sprint(s.tenant), "k": fmt.Sprint(k), "hits": fmt.Sprint(len(hits))})
+		return s.toolText(req.ID, formatRecall(query, hits))
 	case "stats":
 		return s.toolText(req.ID, fmt.Sprintf("journal holds %d events", s.store.ReadNextSeq()-1))
 	default:
 		return s.toolErr(req.ID, "unknown tool: "+p.Name)
 	}
+}
+
+// formatRecall renders recall hits as readable, model-friendly text.
+func formatRecall(query string, hits []memory.Memory) string {
+	if len(hits) == 0 {
+		return fmt.Sprintf("no memories found for %q (0 stored matches)", query)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d relevant memor%s for %q (closest first):\n", len(hits), plural(len(hits)), query)
+	for i, h := range hits {
+		fmt.Fprintf(&b, "%d. [#%d", i+1, h.ID)
+		if len(h.Tags) > 0 {
+			fmt.Fprintf(&b, " %v", h.Tags)
+		}
+		fmt.Fprintf(&b, " dist=%.3f] %s\n", h.Score, h.Text)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
+}
+
+// stringsArg pulls a []string from a JSON array argument (ignoring non-strings).
+func stringsArg(args map[string]any, key string) []string {
+	raw, ok := args[key].([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, v := range raw {
+		if s, ok := v.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func liftVerdict(lift float64) string {

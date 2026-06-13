@@ -1,0 +1,182 @@
+// Package memory is the semantic-memory layer of Matrix Sentry: the thing that
+// stops a coding agent from having amnesia. Remember persists a piece of text
+// with its embedding to the durable journal and indexes it; Recall embeds a
+// query and returns the nearest stored memories. It is the bridge between the
+// SentryLog journal (sentry/) and the vector engine.
+//
+// Search is EXACT (brute-force L2 over the stored vectors). At an agent's real
+// memory volume (tens to low thousands of items) exact search is sub-millisecond
+// and recall-perfect — the honest 100%-correct baseline. The validated
+// ivf.Recommended + SearchRerank path is the scale optimization that drops in
+// behind this same API when a corpus grows large enough to need it.
+package memory
+
+import (
+	"fmt"
+	"sort"
+	"sync"
+
+	"matrixsentry/sentry"
+)
+
+// EventMemory is the journal record type for a stored memory (text + vector).
+const EventMemory sentry.EventType = 3
+
+// MemoryPayload is the persisted form of one memory. The vector is stored so a
+// reopened store rebuilds its index without re-embedding (embedding is the only
+// external, expensive, possibly-nondeterministic step).
+type MemoryPayload struct {
+	ID     uint64    `json:"id"`
+	Text   string    `json:"text"`
+	Vector []float32 `json:"vec"`
+	Tags   []string  `json:"tags,omitempty"`
+	Source string    `json:"src,omitempty"`
+}
+
+// Memory is a recall result: the stored item plus its distance to the query
+// (Score; 0 = identical, smaller = closer).
+type Memory struct {
+	ID     uint64
+	Text   string
+	Tags   []string
+	Source string
+	Score  float32
+}
+
+// Embedder turns text into vectors. Implementations must be consistent: the
+// same text embeds to the same dimension every call.
+type Embedder interface {
+	Embed(texts []string) ([][]float32, error)
+	Dim() int
+}
+
+type entry struct {
+	tenant sentry.TenantID
+	mem    MemoryPayload
+}
+
+// Store is the semantic memory: a journal for durability plus an in-RAM vector
+// table for search. Safe for concurrent use.
+type Store struct {
+	journal *sentry.Store
+	embed   Embedder
+	mu      sync.Mutex
+	entries []entry
+	nextID  uint64
+}
+
+// New wraps a journal with semantic memory, rebuilding the in-RAM index from
+// any EventMemory records already on disk (no re-embedding). It errors if a
+// persisted vector's length disagrees with the embedder dimension, which would
+// make recall distances meaningless.
+func New(journal *sentry.Store, embed Embedder) (*Store, error) {
+	s := &Store{journal: journal, embed: embed, nextID: 1}
+	etype := EventMemory
+	var scanErr error
+	err := journal.Scan(sentry.Filter{Type: &etype}, func(r sentry.Record) bool {
+		var p MemoryPayload
+		if err := sentry.UnmarshalPayload(r.Payload, &p); err != nil {
+			scanErr = fmt.Errorf("memory: decode record seq %d: %w", r.Seq, err)
+			return false
+		}
+		if len(p.Vector) != embed.Dim() {
+			scanErr = fmt.Errorf("memory: persisted vector dim %d != embedder dim %d (id %d)", len(p.Vector), embed.Dim(), p.ID)
+			return false
+		}
+		s.entries = append(s.entries, entry{tenant: r.Tenant, mem: p})
+		if p.ID >= s.nextID {
+			s.nextID = p.ID + 1
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if scanErr != nil {
+		return nil, scanErr
+	}
+	return s, nil
+}
+
+// Remember embeds text, persists it to the journal as an EventMemory, and adds
+// it to the in-RAM index. Returns the assigned memory id.
+func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src string) (uint64, error) {
+	vecs, err := s.embed.Embed([]string{text})
+	if err != nil {
+		return 0, fmt.Errorf("memory: embed: %w", err)
+	}
+	if len(vecs) != 1 || len(vecs[0]) != s.embed.Dim() {
+		return 0, fmt.Errorf("memory: embedder returned %d vectors / bad dim", len(vecs))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := MemoryPayload{ID: s.nextID, Text: text, Vector: vecs[0], Tags: tags, Source: src}
+	if _, err := s.journal.Append(tenant, EventMemory, p); err != nil {
+		return 0, fmt.Errorf("memory: append: %w", err)
+	}
+	s.entries = append(s.entries, entry{tenant: tenant, mem: p})
+	s.nextID++
+	return p.ID, nil
+}
+
+// Recall embeds query and returns the k nearest memories for tenant, ascending
+// by L2 distance (closest first). An empty store yields an empty slice.
+func (s *Store) Recall(tenant sentry.TenantID, query string, k int) ([]Memory, error) {
+	if k <= 0 {
+		return nil, nil
+	}
+	vecs, err := s.embed.Embed([]string{query})
+	if err != nil {
+		return nil, fmt.Errorf("memory: embed query: %w", err)
+	}
+	if len(vecs) != 1 || len(vecs[0]) != s.embed.Dim() {
+		return nil, fmt.Errorf("memory: embedder returned %d vectors / bad dim", len(vecs))
+	}
+	q := vecs[0]
+
+	s.mu.Lock()
+	scored := make([]Memory, 0, len(s.entries))
+	for _, e := range s.entries {
+		if e.tenant != tenant {
+			continue
+		}
+		scored = append(scored, Memory{
+			ID: e.mem.ID, Text: e.mem.Text, Tags: e.mem.Tags,
+			Source: e.mem.Source, Score: sqL2(q, e.mem.Vector),
+		})
+	}
+	s.mu.Unlock()
+
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].Score != scored[j].Score {
+			return scored[i].Score < scored[j].Score
+		}
+		return scored[i].ID < scored[j].ID
+	})
+	if len(scored) > k {
+		scored = scored[:k]
+	}
+	return scored, nil
+}
+
+// Count returns how many memories tenant has stored.
+func (s *Store) Count(tenant sentry.TenantID) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, e := range s.entries {
+		if e.tenant == tenant {
+			n++
+		}
+	}
+	return n
+}
+
+func sqL2(a, b []float32) float32 {
+	var d float32
+	for i := range a {
+		diff := a[i] - b[i]
+		d += diff * diff
+	}
+	return d
+}
