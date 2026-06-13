@@ -258,8 +258,19 @@ model) can store context and recall it by meaning across sessions.
 - **⚠️ MUST DO in Cloudflare dashboard:** disable **Bot Fight Mode** for `blazesphere.net` (Security →
   Bots) — Anthropic's connector broker is server-to-server and gets bot-blocked silently otherwise.
 
+## ✅ AUTO-RECALL HOOK — closed the "wired vs used" gap (2026-06-13)
+
+Real-log diagnosis: `record_access` (PostToolUse) fires ~5/min (13k+ accesses) but `remember`/`recall`
+sat idle — the engine was wired but the semantic memory was a drawer nobody opened. Fix: `cmd/sentry-recall`
+(TDD, 9 tests), a **SessionStart** hook (`~/.local/bin/sentry-recall`, registered `async:false` in
+`~/.claude/settings.json`) that recalls the top-5 memories for the current project (query = cwd basename)
+and injects them as `additionalContext` at session start. Best-effort (clean exit 0 if the server is
+slow/down; 5s timeout; synchronous so stdout injects). Activates on the NEXT session start. Now both halves
+are automatic: passive capture (record_access) + active injection (recall). Next: improve the recall query
+(git remote/README beats cwd basename — distances cluster, ordering is imperfect).
+
 ## Pending / next steps (Alvin's queue)
-1. **Disable Bot Fight Mode** for the zone (above) before relying on the claude.ai web connector.
+1. **Disable Bot Fight Mode** for the zone before relying on the claude.ai web connector.
 2. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
    corpus grows large enough to need it (API unchanged; originals fetch = persisted vectors/CAS).
 3. `main` now holds everything (operational cache, GA tuner, ivf.Recommended, semantic memory, OAuth).
