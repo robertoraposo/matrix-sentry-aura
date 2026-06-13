@@ -299,6 +299,23 @@ deduplicates). Built TDD, two-stage reviewed (spec + quality), all on `main`, 0 
 - **Rollback:** remove the `Stop` block from `~/.claude/settings.json`; on the VM `mv /root/sentrymcp.bak
   /root/sentrymcp && systemctl restart sentrymcp` and drop `SENTRY_DEDUP_TAU`.
 
+### Supersede-dedup LIVE — corrections replace stale facts (2026-06-13)
+
+The first live reflection exposed a gap: semantic dedup is **truth-blind** — a fact and its *correction*
+embed close, so an update gets deduped away like a redundant restatement (the reflection's "auto-remember
+is LIVE" was suppressed against the stale roadmap memory #23 "remember is still manual"). Fixed with
+**explicit-intent supersede** (spec/plan: `docs/superpowers/{specs,plans}/2026-06-13-supersede-dedup.*`):
+- `memory.Store.Remember` gained a `supersedes uint64` param + a `superseded` return. When it names an
+  existing same-tenant memory, it **bypasses the dedup gate**, appends `EventMemory{Supersedes:id}`, and
+  drops the old id from the in-RAM index. The append-only journal keeps the old record (history on disk;
+  current truth in the index); `New` drops superseded ids on rebuild. TDD: 5 tests incl. survives-reopen.
+- `cmd/sentrymcp` `remember` tool gained an optional `supersedes` arg and reports
+  "remembered as memory #N, superseding #M". `cmd/sentry-reflect`'s prompt now tells the agent to use it
+  for outdated/wrong memories. Hook rebuilt+reinstalled; sentrymcp redeployed (prev `/root/sentrymcp.bak`).
+- **Verified live:** `remember(…, supersedes:23)` → "remembered as memory #40, superseding #23"; recall for
+  "is auto-remember automatic or still manual" now returns #40 and **#23 is gone from the index**. The very
+  fact that exposed the gap is now corrected in the live corpus.
+
 ## Pending / next steps (Alvin's queue)
 1. **Disable Bot Fight Mode** for the zone before relying on the claude.ai web connector.
 2. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
