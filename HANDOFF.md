@@ -392,6 +392,15 @@ margin features → `(nprobe, rerankK)` to Pareto-dominate the static `ivf.Recom
   client re-lists tools. (Server `listChanged` notifications don't help here: stateless Streamable HTTP +
   redeploy-restart means there's no live connection to notify; the client re-lists on its own lifecycle.)
   Lesson: after deploying new MCP tool surface, RECONNECT the client before testing from the agent side.
+- **Dedup τ recalibrated 0.85 → 0.45 (2026-06-14, results/tau-recalibration.md).** Three prod sessions showed
+  τ=0.85 over-collapsing DISTINCT same-domain facts (BlazeTeams Fiber+GORM deduped against #4's BlazeSphere
+  chi+Huma — a contradicting collapse; Ashley perception vs #37 brain; #22 vs GP). The original `tauprobe`
+  measured "distinct" with cross-TOPIC facts (floor 1.238) → τ=0.85 looked safe, but same-DOMAIN distinct
+  facts embed at ~0.685 (BlazeSphere vs BlazeTeams stack), below 0.85. Re-measured with representative pairs:
+  paraphrase 0.21 ≪ 0.45 ≪ 0.685 distinct. `SENTRY_DEDUP_TAU=0.45` is server-side so it fixes ALL clients
+  (incl. stale ones that can't reach `force`). Bias is intentionally toward false-negatives now that `forget`
+  can clean redundancy — a collapsed distinct fact is silent corruption, a stored near-dup is cheap.
+  Lesson: calibrate dedup τ against same-domain distinct pairs, not cross-topic ones.
 
 ## How to test the bridge right now
 New Claude Code session on any project → ask it to use `record_access` while working, then

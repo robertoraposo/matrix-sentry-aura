@@ -35,8 +35,14 @@ whereas a collapsed distinct fact (or a contradicting collapse like BlazeTeams�
 already-connected sessions whose stale tool cache can't reach `force`/`supersede`/`forget`.** That is why
 lowering τ is the right lever for the real world, not "reconnect every session".
 
-## Deploy status: PENDING user authorization
+## Deploy status: DONE + verified (2026-06-14, user-authorized)
 
-The change — `SENTRY_DEDUP_TAU=0.85 → 0.45` on the VM + `systemctl restart sentrymcp` — was blocked by the
-auto-mode classifier as an autonomous prod change. Awaiting explicit authorization (see HANDOFF / chat).
-`cmd/tauprobe`'s probe set updated to the representative pairs (this commit) so the calibration is reproducible.
+`SENTRY_DEDUP_TAU=0.85 → 0.45` on the VM + `systemctl restart sentrymcp` (active). Live verification against
+the exact production scenario:
+- BlazeTeams (Fiber+GORM) distinct fact → `remembered as memory #62` (stored separately; at τ=0.85 it
+  deduped against #4 — the bug). Forgotten afterward (`forgot #62`) to keep the corpus clean.
+- BlazeSphere paraphrase of #4 → `already known as memory #4 (deduped)` — true paraphrases still collapse.
+
+Because it is server-side, it fixes ALL clients at once, including the stale Ashley/BlazeTeams sessions that
+can't reach `force` — no reconnect needed. `cmd/tauprobe`'s probe set is updated to the representative pairs
+so the calibration is reproducible.
