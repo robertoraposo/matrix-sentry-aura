@@ -333,6 +333,17 @@ distinct)**. Deployed (sentrymcp redeployed, hook reinstalled), all TDD/reviewed
   `supersedes` replaces one-for-one (net zero), so nothing can REDUCE the live set. A `forget`/delete tool is
   the natural next lever (and the honest way to clean accidental dups like #41/#42).
 
+### Forget LIVE — the curation set is complete (2026-06-13)
+
+Built the forget lever (spec/plan `docs/superpowers/{specs,plans}/2026-06-13-forget.*`): a logical delete via
+an `EventForget` tombstone (`memory.EventForget=4`, `Forget(tenant,id)`), applied on rebuild as a 2nd filtered
+pass so the shrink survives reopen; the original record stays on disk (append-only). `cmd/sentrymcp` gained a
+`forget` tool (`id` arg). **Governance:** on-demand only — the reflection prompt is NOT changed, so the agent
+never auto-prunes; forget is deliberate. TDD (no-op-writes-nothing via ReadNextSeq, double-forget idempotency,
+survives-reopen, tenant isolation), reviewed, module green. **Deployed + verified live:** `forget(42)` removed
+the duplicate the force test left (#41 the GP fact survives, #42 gone); `forget(99999)` → "not found".
+The curation set is now complete: **skip (redundant) / supersede:id (update) / force (distinct) / forget:id (remove).**
+
 ## ✅/❌ GP ADAPTIVE PER-QUERY POLICY — built, feasibility GATE FAIL (2026-06-13)
 
 Lever: evolve (genetic programming, arithmetic-expression trees) a per-query policy mapping coarse-distance
