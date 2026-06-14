@@ -25,13 +25,24 @@ type probe struct {
 	text  string
 }
 
+// Representative probe set (2026-06-14): mirrors the REAL production collisions
+// where tau=0.85 over-collapsed. Same group = true paraphrase (SHOULD dedup);
+// different groups = distinct facts that SHARE domain vocabulary (SHOULD NOT
+// dedup) — these are the close cross-group pairs the original cross-topic probe
+// never measured.
 var probes = []probe{
-	{"journal", "Never sentry.Open the live journal directory; copy the .log files first because crash recovery can truncate them."},
-	{"journal", "Don't open the live journal dir directly with sentry.Open — snapshot the .log files first, since recovery may truncate the journal."},
-	{"ivfcfg", "ivf.Recommended uses geometry 64-96-64 with nprobe 32 and rerankK 200 for production recall."},
-	{"ivfcfg", "The canonical production engine config (ivf.Recommended) is nlist 64, M 96, K 64, nprobe 32, with exact re-rank of the top 200."},
-	{"botfight", "Disable Cloudflare Bot Fight Mode so the claude.ai connector can reach the MCP server."},
-	{"hooks", "Hooks are best-effort: any failure must exit 0 so the agent's tool use is never blocked."},
+	// Paraphrase pair (must dedup): the high-volume auto-reflect restatement case.
+	{"arstatus", "Matrix Sentry auto-remember is live: a global Stop hook self-reports durable knowledge and the server deduplicates remembers."},
+	{"arstatus", "Auto-remember is now automatic in Matrix Sentry — a Stop hook makes the agent self-report durable facts, deduplicated server-side."},
+	// Same-domain DISTINCT pair (must NOT dedup): the BlazeTeams→#4 collision.
+	{"bs-stack", "BlazeSphere standard stack: Go backend with chi router + Huma v2 (OpenAPI) + pgx + River job queue, PostgreSQL primary DB."},
+	{"bt-stack", "BlazeTeams backend uses Fiber + GORM (NOT chi/Huma); only the frontend follows the generic BlazeSphere convention."},
+	// Same-project DISTINCT pair (must NOT dedup): the Ashley perception→#37 collision.
+	{"ashley-brain", "Ashley arm64 neural-network brain: float32 neurons in an mmap arena; _brain_tick computes weight*input+bias then activate."},
+	{"ashley-perc", "Ashley perception: a 16x16 retina, center-of-mass tracking of the brightest region, creator-face ADMIN AI recognition."},
+	// Same-domain DISTINCT pair (must NOT dedup): the GP-feasibility→#22 collision.
+	{"ivfcfg", "ivf.Recommended production config: nlist 64, M 96, K 64, nprobe 32, with exact re-rank of the top 200."},
+	{"gpfeas", "GP per-query adaptive policy gated FAIL: coarse-margin features don't predict needed search depth despite 95% oracle headroom."},
 }
 
 func sqL2(a, b []float32) float32 {
