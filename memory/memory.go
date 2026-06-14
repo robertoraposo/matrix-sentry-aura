@@ -22,6 +22,16 @@ import (
 // EventMemory is the journal record type for a stored memory (text + vector).
 const EventMemory sentry.EventType = 3
 
+// EventForget is the journal record type for a tombstone that drops a memory id
+// from the in-RAM index on rebuild. The original EventMemory record stays on
+// disk (append-only); only the live index (current truth) shrinks.
+const EventForget sentry.EventType = 4
+
+// ForgetPayload is the persisted form of a forget tombstone.
+type ForgetPayload struct {
+	ID uint64 `json:"id"`
+}
+
 // MemoryPayload is the persisted form of one memory. The vector is stored so a
 // reopened store rebuilds its index without re-embedding (embedding is the only
 // external, expensive, possibly-nondeterministic step).
@@ -110,6 +120,25 @@ func New(journal *sentry.Store, embed Embedder) (*Store, error) {
 	if scanErr != nil {
 		return nil, scanErr
 	}
+
+	// Pass 2: apply forget tombstones. A forget for id N is always appended after
+	// N's creation, so N is already in the index by now; dropEntry removes it.
+	ftype := EventForget
+	ferr := journal.Scan(sentry.Filter{Type: &ftype}, func(r sentry.Record) bool {
+		var fp ForgetPayload
+		if err := sentry.UnmarshalPayload(r.Payload, &fp); err != nil {
+			scanErr = fmt.Errorf("memory: decode forget record seq %d: %w", r.Seq, err)
+			return false
+		}
+		s.dropEntry(r.Tenant, fp.ID)
+		return true
+	})
+	if ferr != nil {
+		return nil, ferr
+	}
+	if scanErr != nil {
+		return nil, scanErr
+	}
 	return s, nil
 }
 
@@ -193,6 +222,24 @@ func (s *Store) Remember(tenant sentry.TenantID, text string, opts RememberOpts)
 	s.entries = append(s.entries, entry{tenant: tenant, mem: p})
 	s.nextID++
 	return p.ID, false, 0, nil
+}
+
+// Forget removes a memory from the live index so recall no longer returns it,
+// by appending an EventForget tombstone and dropping the id. The original record
+// is retained on disk (append-only). Tenant-scoped: forgetting an id that is
+// absent or owned by another tenant is a no-op returning (false, nil) — never an
+// error, and no tombstone is written.
+func (s *Store) Forget(tenant sentry.TenantID, id uint64) (forgotten bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasEntry(tenant, id) {
+		return false, nil
+	}
+	if _, err := s.journal.Append(tenant, EventForget, ForgetPayload{ID: id}); err != nil {
+		return false, fmt.Errorf("memory: append forget: %w", err)
+	}
+	s.dropEntry(tenant, id)
+	return true, nil
 }
 
 // hasEntry reports whether (tenant, id) is live in the index. Caller holds s.mu.

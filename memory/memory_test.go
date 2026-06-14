@@ -416,3 +416,75 @@ func TestSupersedeTakesPrecedenceOverForce(t *testing.T) {
 		t.Fatalf("count = %d, want 1 (replaced, not added)", n)
 	}
 }
+
+func TestForgetRemovesFromIndex(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	id, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	st.Remember(1, "rocket", RememberOpts{})
+	got, err := st.Forget(1, id)
+	if err != nil || !got {
+		t.Fatalf("Forget = (%v,%v), want (true,nil)", got, err)
+	}
+	if n := st.Count(1); n != 1 {
+		t.Fatalf("count = %d, want 1 (cat forgotten)", n)
+	}
+	res, _ := st.Recall(1, "cat", 5)
+	for _, m := range res {
+		if m.ID == id {
+			t.Fatalf("forgotten id %d still recallable", id)
+		}
+	}
+}
+
+func TestForgetAbsentOrForeignIsNoOp(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	id, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	if got, _ := st.Forget(1, 999); got {
+		t.Fatal("forgetting an absent id should return false")
+	}
+	if got, _ := st.Forget(2, id); got { // id belongs to tenant 1
+		t.Fatal("forgetting another tenant's id should return false")
+	}
+	if n := st.Count(1); n != 1 {
+		t.Fatalf("count = %d, want 1 (nothing forgotten)", n)
+	}
+}
+
+func TestForgetSurvivesReopen(t *testing.T) {
+	emb := geoEmbedder()
+	dir := t.TempDir()
+	j, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := New(j, emb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idA, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	st.Remember(1, "rocket", RememberOpts{})
+	st.Forget(1, idA)
+	j.Close()
+
+	j2, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st2, err := New(j2, emb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := st2.Count(1); n != 1 {
+		t.Fatalf("after reopen count = %d, want 1 (forget survives)", n)
+	}
+	res, _ := st2.Recall(1, "cat", 5)
+	for _, m := range res {
+		if m.ID == idA {
+			t.Fatalf("forgotten id %d reappeared after reopen", idA)
+		}
+	}
+	id3, _, _, _ := st2.Remember(1, "feline", RememberOpts{})
+	if id3 != 3 {
+		t.Fatalf("next id = %d, want 3 (no reuse after forget)", id3)
+	}
+}
