@@ -437,8 +437,18 @@ func TestForgetRemovesFromIndex(t *testing.T) {
 }
 
 func TestForgetAbsentOrForeignIsNoOp(t *testing.T) {
-	st, _ := newTestStore(t, geoEmbedder())
-	id, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	emb := geoEmbedder()
+	dir := t.TempDir()
+	j, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	st, err := New(j, emb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, _, _ := st.Remember(1, "cat", RememberOpts{}) // 1 record -> nextSeq == 2
 	if got, _ := st.Forget(1, 999); got {
 		t.Fatal("forgetting an absent id should return false")
 	}
@@ -447,6 +457,10 @@ func TestForgetAbsentOrForeignIsNoOp(t *testing.T) {
 	}
 	if n := st.Count(1); n != 1 {
 		t.Fatalf("count = %d, want 1 (nothing forgotten)", n)
+	}
+	// the no-op Forgets must NOT have written any tombstone to the journal
+	if seq := j.ReadNextSeq(); seq != 2 {
+		t.Fatalf("no-op Forget wrote to the journal: nextSeq=%d, want 2", seq)
 	}
 }
 
@@ -474,6 +488,7 @@ func TestForgetSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer j2.Close()
 	if n := st2.Count(1); n != 1 {
 		t.Fatalf("after reopen count = %d, want 1 (forget survives)", n)
 	}
@@ -486,5 +501,16 @@ func TestForgetSurvivesReopen(t *testing.T) {
 	id3, _, _, _ := st2.Remember(1, "feline", RememberOpts{})
 	if id3 != 3 {
 		t.Fatalf("next id = %d, want 3 (no reuse after forget)", id3)
+	}
+}
+
+func TestDoubleForgetIsNoOp(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	id, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	if got, _ := st.Forget(1, id); !got {
+		t.Fatal("first forget should return true")
+	}
+	if got, _ := st.Forget(1, id); got {
+		t.Fatal("second forget of the same id should return false (already gone)")
 	}
 }
