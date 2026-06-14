@@ -318,6 +318,21 @@ is LIVE" was suppressed against the stale roadmap memory #23 "remember is still 
   "is auto-remember automatic or still manual" now returns #40 and **#23 is gone from the index**. The very
   fact that exposed the gap is now corrected in the live corpus.
 
+### Force escape-hatch LIVE — the within-τ triad is complete (2026-06-13)
+
+A second live reflection surfaced a second dedup limitation: a genuinely-DISTINCT fact (the GP-feasibility
+finding) was deduped against a vocabulary-similar but unrelated memory (#22 engine config). Fix:
+`memory.Remember` refactored to `RememberOpts{Tags, Src, Supersedes, Force}` and a `force:true` bypasses the
+dedup gate (precedence: supersede > force > dedup). `cmd/sentrymcp` `remember` gained a `force` bool; the
+`sentry-reflect` prompt now tells the agent to retry with `force:true` when a deduped fact is genuinely
+distinct. The within-τ triad is now complete: **skip (default) / supersede:id (replace) / force (store
+distinct)**. Deployed (sentrymcp redeployed, hook reinstalled), all TDD/reviewed, module green.
+- **Verified live + a caveat:** `force:true` stored a within-τ near-duplicate that would otherwise dedup (#42
+  stored despite identical #41). But the verification was over-eager and left a duplicate pair (#41≈#42) in
+  the corpus — which surfaced the NEXT gap: **there is no forget/delete.** The journal is append-only and
+  `supersedes` replaces one-for-one (net zero), so nothing can REDUCE the live set. A `forget`/delete tool is
+  the natural next lever (and the honest way to clean accidental dups like #41/#42).
+
 ## ✅/❌ GP ADAPTIVE PER-QUERY POLICY — built, feasibility GATE FAIL (2026-06-13)
 
 Lever: evolve (genetic programming, arithmetic-expression trees) a per-query policy mapping coarse-distance
