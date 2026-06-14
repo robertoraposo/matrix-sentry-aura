@@ -318,6 +318,23 @@ is LIVE" was suppressed against the stale roadmap memory #23 "remember is still 
   "is auto-remember automatic or still manual" now returns #40 and **#23 is gone from the index**. The very
   fact that exposed the gap is now corrected in the live corpus.
 
+## ✅/❌ GP ADAPTIVE PER-QUERY POLICY — built, feasibility GATE FAIL (2026-06-13)
+
+Lever: evolve (genetic programming, arithmetic-expression trees) a per-query policy mapping coarse-distance
+margin features → `(nprobe, rerankK)` to Pareto-dominate the static `ivf.Recommended`. Built feasibility-first
+(spec/plan `docs/superpowers/{specs,plans}/2026-06-13-gp-adaptive-policy.*`):
+- **Built + TDD'd (committed, reusable):** `internal/gp` (deterministic GP engine — protected ops,
+  depth-limited variation, injective fitness cache); `ivf.Features`/`QueryFeatures`/`SearchPolicy`
+  (per-query adaptive depth, == `SearchRerank` at constant depth); `cmd/gpevolve` (Phase-0 measurement).
+- **Phase-0 GATE on real 47k×768 (results/gp-adaptive-feasibility.md): FAIL.** Per-query headroom is
+  ENORMOUS — a min-depth oracle hits recall@10 0.999 at **4.6% of static's cost (95% headroom)** — but the
+  coarse-margin features are **blind** to which queries need depth (max |Pearson| = 0.073 ≈ 0). A GP over
+  these features would evolve on noise. STOP per the hard gate (no evolve run; Tasks 5–6 not pursued).
+- **The cheap gate (minutes) avoided a ~2.5h doomed evolution + integration.** Redirect: the lever is real,
+  the FEATURE is wrong — a future attempt needs **post-search** signals (e.g. top ADC-candidate distance
+  gaps of the shortlist), computed mid-search → adaptive rerank depth. That is a separate spec; the GP engine
+  + `SearchPolicy` plumbing are already in place to reuse.
+
 ## Pending / next steps (Alvin's queue)
 1. **Disable Bot Fight Mode** for the zone before relying on the claude.ai web connector.
 2. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
