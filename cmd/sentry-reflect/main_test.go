@@ -127,3 +127,11 @@ func TestReflectionPromptAdvertisesSupersede(t *testing.T) {
 		}
 	}
 }
+
+func TestReflectionPromptAdvertisesForce(t *testing.T) {
+	// The prompt must tell the agent to force-store a genuinely-distinct fact that
+	// was deduped against a vocabulary-similar but unrelated memory.
+	if !strings.Contains(reflectionPrompt, "force") {
+		t.Fatal("reflectionPrompt should advertise force:true for distinct deduped facts")
+	}
+}

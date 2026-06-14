@@ -102,6 +102,8 @@ const reflectionPrompt = "Pause before finishing. Reflect on the work since your
 	"duplicating what is already stored, then call the remember tool once per genuinely-new fact, each fact " +
 	"self-contained and concise. If recall surfaces a memory that is now outdated or wrong, call remember " +
 	"with supersedes set to that memory's id to replace it instead of storing a contradicting duplicate. " +
+	"If remember reports your fact was deduped but it is genuinely distinct (not a restatement of the named " +
+	"memory), call remember again with force set to true to store it anyway. " +
 	"Do NOT store transient state, file contents, task progress, or anything already in the code or git. " +
 	"If nothing durable was learned, store nothing. Be terse — do not narrate this to the user. Then finish."
 
