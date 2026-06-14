@@ -383,6 +383,15 @@ margin features → `(nprobe, rerankK)` to Pareto-dominate the static `ivf.Recom
 - MCP endpoint `http://10.10.10.96:8808/mcp`; token via `claude mcp get matrix-sentry`.
 - Hook scope is global (every project → tenant 1, the honest "agent's working life" stream). The
   `Source` tag on each access lets `analyze_access` be segmented by tool later (e.g. Read-only lift).
+- **GOTCHA — stale MCP client tool cache (diagnosed 2026-06-13):** an MCP client (Claude Code / claude.ai
+  connector) lists `tools/list` at connect and caches the schemas; it strips args it doesn't know. If you
+  add tool args (e.g. `supersedes`/`force`) or new tools (`forget`) and redeploy MID-SESSION, an
+  already-connected client keeps the OLD schema and silently downgrades calls (e.g. a `remember` with
+  `supersedes` becomes a plain remember → dedup). The server is fine — verified via raw JSON-RPC
+  (`tools/call` with the arg works: it superseded #40 → #43). Remedy: reconnect / start a new session so the
+  client re-lists tools. (Server `listChanged` notifications don't help here: stateless Streamable HTTP +
+  redeploy-restart means there's no live connection to notify; the client re-lists on its own lifecycle.)
+  Lesson: after deploying new MCP tool surface, RECONNECT the client before testing from the agent side.
 
 ## How to test the bridge right now
 New Claude Code session on any project → ask it to use `record_access` while working, then
