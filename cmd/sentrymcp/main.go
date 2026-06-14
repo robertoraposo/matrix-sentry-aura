@@ -323,6 +323,17 @@ func toolList() []map[string]any {
 			},
 		},
 		{
+			"name":        "forget",
+			"description": "Remove a memory from recall by id (e.g. an accidental duplicate or a wrong fact). The record stays in the journal history; it just stops being returned by recall. Use deliberately — there is no automatic un-forget.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "integer", "description": "the memory id to forget (as shown by recall, e.g. the #N)"},
+				},
+				"required": []any{"id"},
+			},
+		},
+		{
 			"name":        "stats",
 			"description": "Return how many events are stored in the journal.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
@@ -432,6 +443,25 @@ func (s *server) callTool(req rpcReq) rpcResp {
 		}
 		s.moko.Info("recall", map[string]string{"tenant": fmt.Sprint(s.tenant), "k": fmt.Sprint(k), "hits": fmt.Sprint(len(hits))})
 		return s.toolText(req.ID, formatRecall(query, hits))
+	case "forget":
+		if s.mem == nil {
+			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
+		}
+		id := uintArg(p.Args, "id")
+		if id == 0 {
+			return s.toolErr(req.ID, "provide an 'id' to forget")
+		}
+		s.mu.Lock()
+		forgotten, err := s.mem.Forget(s.tenant, id)
+		s.mu.Unlock()
+		if err != nil {
+			return s.toolErr(req.ID, "forget failed: "+err.Error())
+		}
+		s.moko.Info("forget", map[string]string{"tenant": fmt.Sprint(s.tenant), "id": fmt.Sprint(id), "forgotten": fmt.Sprint(forgotten)})
+		if forgotten {
+			return s.toolText(req.ID, fmt.Sprintf("forgot memory #%d (removed from recall; still in the journal history)", id))
+		}
+		return s.toolText(req.ID, fmt.Sprintf("memory #%d not found for this tenant", id))
 	case "stats":
 		return s.toolText(req.ID, fmt.Sprintf("journal holds %d events", s.store.ReadNextSeq()-1))
 	default:

@@ -235,6 +235,32 @@ func TestMemoryToolsListed(t *testing.T) {
 	}
 }
 
+func TestForgetToolValidation(t *testing.T) {
+	// Without an embedder (s.mem == nil), the mem==nil guard fires first.
+	s := newTestServer(t)
+	r := callNamed(s, "forget", map[string]any{})
+	m := r.Result.(map[string]any)
+	if m["isError"] != true {
+		t.Fatalf("forget without embedder must error, got %#v", m)
+	}
+	content := m["content"].([]map[string]any)[0]["text"].(string)
+	if !strings.Contains(content, "embed") {
+		t.Fatalf("forget error should mention embedder, got %q", content)
+	}
+
+	// With an embedder: missing 'id' should return an error mentioning "id".
+	s2 := newMemServer(t)
+	r2 := callNamed(s2, "forget", map[string]any{})
+	m2 := r2.Result.(map[string]any)
+	if m2["isError"] != true {
+		t.Fatalf("forget without id must error, got %#v", m2)
+	}
+	content2 := m2["content"].([]map[string]any)[0]["text"].(string)
+	if !strings.Contains(content2, "id") {
+		t.Fatalf("forget missing-id error should mention 'id', got %q", content2)
+	}
+}
+
 func TestBoolArg(t *testing.T) {
 	if !boolArg(map[string]any{"force": true}, "force") {
 		t.Fatal("true not parsed")
