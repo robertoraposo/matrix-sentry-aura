@@ -100,20 +100,3 @@ func sqL2f(a, b []float32) float64 {
 	return s
 }
 
-// idsOf extracts base-vector ids from a slice of ivf.Hit via idByHash lookup.
-// Hits whose hash has no entry in idByHash are silently skipped.
-func idsOf(hits []hit, idByHash map[uint64]int32) []int32 {
-	out := make([]int32, 0, len(hits))
-	for _, h := range hits {
-		if id, ok := idByHash[h.hash]; ok {
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
-// hit is a minimal wrapper so idsOf can be tested without importing ivf in proxy.go.
-// main.go converts ivf.Hit → hit inline.
-type hit struct {
-	hash uint64
-}

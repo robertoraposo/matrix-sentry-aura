@@ -57,6 +57,10 @@ func main() {
 	if eN+hN > len(query) {
 		hN = len(query) - eN
 	}
+	if eN == 0 {
+		fmt.Fprintln(os.Stderr, "gpevolve: empty query set (check -data path / dataset files)")
+		os.Exit(1)
+	}
 	queryE := query[:eN]
 	_ = query[eN : eN+hN] // H reserved; silence unused warning via blank
 
