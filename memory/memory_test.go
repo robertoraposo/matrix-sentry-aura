@@ -60,7 +60,7 @@ func geoEmbedder() *fakeEmbedder {
 func TestRecallReturnsNearestNeighborFirst(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
 	for _, text := range []string{"cat", "rocket", "feline"} {
-		if _, _, _, err := st.Remember(1, text, nil, "", 0); err != nil {
+		if _, _, _, err := st.Remember(1, text, RememberOpts{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -82,7 +82,7 @@ func TestRecallReturnsNearestNeighborFirst(t *testing.T) {
 func TestRecallKLimitsResults(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
 	for _, text := range []string{"cat", "kitten", "feline", "rocket", "engine"} {
-		st.Remember(1, text, nil, "", 0)
+		st.Remember(1, text, RememberOpts{})
 	}
 	got, err := st.Recall(1, "cat", 2)
 	if err != nil {
@@ -106,8 +106,8 @@ func TestRecallEmptyStoreIsEmptyNotError(t *testing.T) {
 
 func TestRememberAssignsSequentialIDs(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
-	a, _, _, _ := st.Remember(1, "cat", nil, "", 0)
-	b, _, _, _ := st.Remember(1, "rocket", nil, "", 0)
+	a, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	b, _, _, _ := st.Remember(1, "rocket", RememberOpts{})
 	if a == 0 || b != a+1 {
 		t.Fatalf("ids not sequential: %d then %d", a, b)
 	}
@@ -115,8 +115,8 @@ func TestRememberAssignsSequentialIDs(t *testing.T) {
 
 func TestRecallIsTenantScoped(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
-	st.Remember(1, "cat", nil, "", 0)
-	st.Remember(2, "rocket", nil, "", 0)
+	st.Remember(1, "cat", RememberOpts{})
+	st.Remember(2, "rocket", RememberOpts{})
 	got, _ := st.Recall(1, "kitten", 10)
 	if len(got) != 1 || got[0].Text != "cat" {
 		t.Fatalf("tenant 1 recall leaked or missed: %+v", got)
@@ -134,8 +134,8 @@ func TestRememberPersistsAcrossReopenWithoutReembedding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Remember(1, "cat", []string{"animal"}, "Read", 0)
-	st.Remember(1, "rocket", nil, "", 0)
+	st.Remember(1, "cat", RememberOpts{Tags: []string{"animal"}, Src: "Read"})
+	st.Remember(1, "rocket", RememberOpts{})
 	j.Close()
 
 	// reopen: rebuild from the journal. A nil embedder proves recall over
@@ -161,7 +161,7 @@ func TestRememberPersistsAcrossReopenWithoutReembedding(t *testing.T) {
 		t.Fatalf("tags not persisted: %+v", got[0].Tags)
 	}
 	// next id must continue after the rebuilt max
-	id, _, _, _ := st2.Remember(1, "feline", nil, "", 0)
+	id, _, _, _ := st2.Remember(1, "feline", RememberOpts{})
 	if id != 3 {
 		t.Fatalf("nextID after rebuild = %d, want 3", id)
 	}
@@ -169,7 +169,7 @@ func TestRememberPersistsAcrossReopenWithoutReembedding(t *testing.T) {
 
 func TestRecallScoresAreDistances(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
-	st.Remember(1, "cat", nil, "", 0)
+	st.Remember(1, "cat", RememberOpts{})
 	got, _ := st.Recall(1, "cat", 1)
 	if got[0].Score != 0 {
 		t.Fatalf("self-distance should be 0, got %f", got[0].Score)
@@ -182,7 +182,7 @@ func TestNewRejectsDimMismatchOnRebuild(t *testing.T) {
 	dir := t.TempDir()
 	j, _ := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
 	st, _ := New(j, &fakeEmbedder{dim: 2, table: nil})
-	st.Remember(1, "x", nil, "", 0)
+	st.Remember(1, "x", RememberOpts{})
 	j.Close()
 	j2, _ := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
 	defer j2.Close()
@@ -197,12 +197,12 @@ func TestRememberDedupsNearDuplicate(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
 	st.DedupThreshold = 0.05 // kitten(0.01) < tau < feline(0.25)
 
-	id1, dup1, _, err := st.Remember(1, "cat", nil, "", 0)
+	id1, dup1, _, err := st.Remember(1, "cat", RememberOpts{})
 	if err != nil || dup1 {
 		t.Fatalf("first store: id=%d dup=%v err=%v", id1, dup1, err)
 	}
 	// "kitten" is within tau of "cat" -> deduped, not persisted, returns id1.
-	id2, dup2, _, err := st.Remember(1, "kitten", nil, "", 0)
+	id2, dup2, _, err := st.Remember(1, "kitten", RememberOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestRememberDedupsNearDuplicate(t *testing.T) {
 		t.Fatalf("store grew to %d on a duplicate, want 1", n)
 	}
 	// "feline" is beyond tau -> genuinely new, persisted.
-	_, dup3, _, err := st.Remember(1, "feline", nil, "", 0)
+	_, dup3, _, err := st.Remember(1, "feline", RememberOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,8 +231,8 @@ func TestRememberDedupsNearDuplicate(t *testing.T) {
 func TestRememberNoDedupWhenThresholdZero(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
 	// DedupThreshold defaults to 0 -> feature off, every call persists.
-	st.Remember(1, "cat", nil, "", 0)
-	_, dup, _, _ := st.Remember(1, "cat", nil, "", 0)
+	st.Remember(1, "cat", RememberOpts{})
+	_, dup, _, _ := st.Remember(1, "cat", RememberOpts{})
 	if dup {
 		t.Fatalf("dedup fired with threshold 0 (should be disabled)")
 	}
@@ -244,12 +244,12 @@ func TestRememberNoDedupWhenThresholdZero(t *testing.T) {
 func TestRememberDedupIsTenantScoped(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
 	st.DedupThreshold = 0.05
-	if _, _, _, err := st.Remember(2, "cat", nil, "", 0); err != nil { // tenant 2 stores "cat"
+	if _, _, _, err := st.Remember(2, "cat", RememberOpts{}); err != nil { // tenant 2 stores "cat"
 		t.Fatal(err)
 	}
 	// tenant 1 stores "kitten" — near tenant 2's "cat" but a different tenant,
 	// so it must NOT be deduped across the tenant boundary.
-	_, dup, _, err := st.Remember(1, "kitten", nil, "", 0)
+	_, dup, _, err := st.Remember(1, "kitten", RememberOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,14 +263,14 @@ func TestRememberDedupIsTenantScoped(t *testing.T) {
 
 func TestSupersedeReplacesInIndex(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
-	id1, _, _, err := st.Remember(1, "cat", nil, "", 0)
+	id1, _, _, err := st.Remember(1, "cat", RememberOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := st.Remember(1, "rocket", nil, "", 0); err != nil {
+	if _, _, _, err := st.Remember(1, "rocket", RememberOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	newID, dup, superseded, err := st.Remember(1, "feline", nil, "", id1)
+	newID, dup, superseded, err := st.Remember(1, "feline", RememberOpts{Supersedes: id1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,8 +300,8 @@ func TestSupersedeReplacesInIndex(t *testing.T) {
 func TestSupersedeBypassesDedup(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
 	st.DedupThreshold = 0.05
-	id1, _, _, _ := st.Remember(1, "cat", nil, "", 0)
-	newID, dup, superseded, err := st.Remember(1, "kitten", nil, "", id1)
+	id1, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	newID, dup, superseded, err := st.Remember(1, "kitten", RememberOpts{Supersedes: id1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,8 +318,8 @@ func TestSupersedeBypassesDedup(t *testing.T) {
 
 func TestSupersedeInvalidIDStoresAsNew(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
-	st.Remember(1, "cat", nil, "", 0)
-	_, _, superseded, err := st.Remember(1, "rocket", nil, "", 999)
+	st.Remember(1, "cat", RememberOpts{})
+	_, _, superseded, err := st.Remember(1, "rocket", RememberOpts{Supersedes: 999})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,8 +333,8 @@ func TestSupersedeInvalidIDStoresAsNew(t *testing.T) {
 
 func TestSupersedeIsTenantScoped(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
-	id1, _, _, _ := st.Remember(2, "cat", nil, "", 0)
-	_, _, superseded, err := st.Remember(1, "kitten", nil, "", id1)
+	id1, _, _, _ := st.Remember(2, "cat", RememberOpts{})
+	_, _, superseded, err := st.Remember(1, "kitten", RememberOpts{Supersedes: id1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,8 +360,8 @@ func TestSupersedeSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id1, _, _, _ := st.Remember(1, "cat", nil, "", 0)
-	st.Remember(1, "feline", nil, "", id1)
+	id1, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	st.Remember(1, "feline", RememberOpts{Supersedes: id1})
 	j.Close()
 
 	j2, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
@@ -379,8 +379,40 @@ func TestSupersedeSurvivesReopen(t *testing.T) {
 	if len(got) != 1 || got[0].Text != "feline" {
 		t.Fatalf("after reopen recall = %+v, want only feline", got)
 	}
-	id3, _, _, _ := st2.Remember(1, "rocket", nil, "", 0)
+	id3, _, _, _ := st2.Remember(1, "rocket", RememberOpts{})
 	if id3 != 3 {
 		t.Fatalf("next id = %d, want 3 (no reuse)", id3)
+	}
+}
+
+func TestRememberForceStoresNearDuplicate(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	st.DedupThreshold = 0.05 // kitten(0.01) is within tau of cat
+	st.Remember(1, "cat", RememberOpts{})
+	_, dup, _, err := st.Remember(1, "kitten", RememberOpts{Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup {
+		t.Fatalf("force must not dedup")
+	}
+	if n := st.Count(1); n != 2 {
+		t.Fatalf("count = %d, want 2 (forced store)", n)
+	}
+}
+
+func TestSupersedeTakesPrecedenceOverForce(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	st.DedupThreshold = 0.05
+	id1, _, _, _ := st.Remember(1, "cat", RememberOpts{})
+	_, _, superseded, err := st.Remember(1, "kitten", RememberOpts{Supersedes: id1, Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if superseded != id1 {
+		t.Fatalf("superseded = %d, want %d (supersede precedence)", superseded, id1)
+	}
+	if n := st.Count(1); n != 1 {
+		t.Fatalf("count = %d, want 1 (replaced, not added)", n)
 	}
 }

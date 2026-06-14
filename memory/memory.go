@@ -125,18 +125,26 @@ func (s *Store) dropEntry(tenant sentry.TenantID, id uint64) {
 	}
 }
 
+// RememberOpts carries the optional inputs to Remember. Zero value = a plain
+// store subject to the dedup gate.
+type RememberOpts struct {
+	Tags       []string
+	Src        string
+	Supersedes uint64 // replace this existing same-tenant memory (bypasses dedup)
+	Force      bool   // store even if a near-duplicate exists (bypasses dedup)
+}
+
 // Remember embeds text and persists it as an EventMemory, returning its id.
 //
-//   - supersedes == 0: normal path. If dedup is enabled (DedupThreshold > 0) and
-//     the nearest same-tenant memory is within that squared-L2 radius, the text
-//     is NOT persisted — the existing id is returned with deduped=true.
-//   - supersedes names an existing same-tenant memory: the dedup gate is bypassed,
-//     the new record carries a Supersedes pointer, the superseded id is dropped
-//     from the in-RAM index, and superseded is set to it. The journal keeps the
-//     old record (history on disk; current truth in the index).
-//   - supersedes names a missing or foreign id: it is ignored and the call falls
-//     back to the normal path (superseded stays 0) — never an error.
-func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src string, supersedes uint64) (id uint64, deduped bool, superseded uint64, err error) {
+//   - opts.Supersedes names an existing same-tenant memory → the dedup gate is
+//     bypassed, the new record carries a Supersedes pointer, the superseded id is
+//     dropped from the index, and superseded is set to it. (Takes precedence over
+//     Force.)
+//   - else opts.Force → store without the dedup gate (persist even within tau).
+//   - else → the dedup gate applies: if dedup is enabled (DedupThreshold > 0) and
+//     the nearest same-tenant memory is within tau, the text is NOT persisted and
+//     the existing id is returned with deduped=true.
+func (s *Store) Remember(tenant sentry.TenantID, text string, opts RememberOpts) (id uint64, deduped bool, superseded uint64, err error) {
 	vecs, err := s.embed.Embed([]string{text})
 	if err != nil {
 		return 0, false, 0, fmt.Errorf("memory: embed: %w", err)
@@ -149,18 +157,18 @@ func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if supersedes != 0 && s.hasEntry(tenant, supersedes) {
-		p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: tags, Source: src, Supersedes: supersedes}
+	if opts.Supersedes != 0 && s.hasEntry(tenant, opts.Supersedes) {
+		p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: opts.Tags, Source: opts.Src, Supersedes: opts.Supersedes}
 		if _, err := s.journal.Append(tenant, EventMemory, p); err != nil {
 			return 0, false, 0, fmt.Errorf("memory: append: %w", err)
 		}
-		s.dropEntry(tenant, supersedes)
+		s.dropEntry(tenant, opts.Supersedes)
 		s.entries = append(s.entries, entry{tenant: tenant, mem: p})
 		s.nextID++
-		return p.ID, false, supersedes, nil
+		return p.ID, false, opts.Supersedes, nil
 	}
 
-	if s.DedupThreshold > 0 {
+	if !opts.Force && s.DedupThreshold > 0 {
 		var bestID uint64
 		var bestDist float32
 		found := false
@@ -178,7 +186,7 @@ func (s *Store) Remember(tenant sentry.TenantID, text string, tags []string, src
 		}
 	}
 
-	p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: tags, Source: src}
+	p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: opts.Tags, Source: opts.Src}
 	if _, err := s.journal.Append(tenant, EventMemory, p); err != nil {
 		return 0, false, 0, fmt.Errorf("memory: append: %w", err)
 	}
