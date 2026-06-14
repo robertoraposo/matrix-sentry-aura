@@ -234,3 +234,18 @@ func TestMemoryToolsListed(t *testing.T) {
 		}
 	}
 }
+
+func TestBoolArg(t *testing.T) {
+	if !boolArg(map[string]any{"force": true}, "force") {
+		t.Fatal("true not parsed")
+	}
+	if boolArg(map[string]any{"force": false}, "force") {
+		t.Fatal("false not parsed")
+	}
+	if boolArg(map[string]any{}, "force") {
+		t.Fatal("missing should be false")
+	}
+	if boolArg(map[string]any{"force": "yes"}, "force") {
+		t.Fatal("non-bool should be false")
+	}
+}

@@ -305,6 +305,7 @@ func toolList() []map[string]any {
 					"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional labels for grouping/filtering"},
 					"src":        map[string]any{"type": "string", "description": "optional originating tool or context"},
 					"supersedes": map[string]any{"type": "integer", "description": "optional id of an existing memory this fact updates or corrects; replaces it instead of storing a contradicting duplicate"},
+					"force": map[string]any{"type": "boolean", "description": "store even if a near-duplicate already exists; use only when your fact is genuinely distinct from what recall/remember reports, not a restatement"},
 				},
 				"required": []any{"text"},
 			},
@@ -395,8 +396,9 @@ func (s *server) callTool(req rpcReq) rpcResp {
 		src, _ := strArg(p.Args, "src")
 		tags := stringsArg(p.Args, "tags")
 		supersedes := uintArg(p.Args, "supersedes")
+		force := boolArg(p.Args, "force")
 		s.mu.Lock()
-		id, deduped, superseded, err := s.mem.Remember(s.tenant, text, tags, src, supersedes)
+		id, deduped, superseded, err := s.mem.Remember(s.tenant, text, memory.RememberOpts{Tags: tags, Src: src, Supersedes: supersedes, Force: force})
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "remember failed: "+err.Error())
@@ -516,6 +518,12 @@ func strArg(args map[string]any, key string) (string, bool) {
 	}
 	s, ok := v.(string)
 	return s, ok
+}
+
+// boolArg reads a boolean arg; missing or non-bool yields false.
+func boolArg(args map[string]any, key string) bool {
+	b, _ := args[key].(bool)
+	return b
 }
 
 // uintArg reads a non-negative integer arg. JSON numbers arrive as float64 in a
