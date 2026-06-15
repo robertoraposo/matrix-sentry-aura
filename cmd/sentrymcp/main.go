@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"matrixsentry/comms"
 	"matrixsentry/memory"
 	"matrixsentry/mokoblinks"
 	"matrixsentry/sentry"
@@ -60,6 +61,7 @@ type server struct {
 	store  *sentry.Store
 	reg    *sentry.Registry // path→id dictionary for real (file-path) accesses
 	mem    *memory.Store    // semantic memory (nil when no embedder is configured)
+	chat   *comms.Store     // agent communication channel
 	oauth  *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
 	moko   *mokoblinks.Client
 	tenant sentry.TenantID
@@ -93,6 +95,12 @@ func main() {
 
 	moko := mokoblinks.FromEnv()
 	s := &server{store: store, reg: reg, moko: moko, tenant: sentry.TenantID(*tenant)}
+
+	s.chat, err = comms.New(store)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sentrymcp: init comms: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Build the token registry from SENTRY_TOKENS_FILE (opt-in multi-tenant).
 	// With no file, only the owner entry exists → identical to single-tenant today.
@@ -356,6 +364,48 @@ func toolList() []map[string]any {
 			},
 		},
 		{
+			"name":        "post",
+			"description": "Post a message to a shared agent channel ('area') so other agents working the same project see it. Use kind=question to ask, kind=answer to reply (set ref to the question's #), kind=info to share, target to direct it at a specific agent (else broadcast).",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"area":   map[string]any{"type": "string", "description": "channel name, e.g. 'projX/backend' (agents agree on names)"},
+					"from":   map[string]any{"type": "string", "description": "your agent label, e.g. 'backend' or '01-core'"},
+					"text":   map[string]any{"type": "string", "description": "the message"},
+					"kind":   map[string]any{"type": "string", "description": "question | answer | info | note (default note)"},
+					"target": map[string]any{"type": "string", "description": "optional agent label to direct this at; empty = broadcast"},
+					"ref":    map[string]any{"type": "integer", "description": "optional message # this replies to"},
+				},
+				"required": []any{"area", "from", "text"},
+			},
+		},
+		{
+			"name":        "read",
+			"description": "Read new messages in an area since a cursor. Pass since=<the last # you saw> to get only newer messages; the response ends with the latest # to use as your next cursor. Poll this to coordinate in near-real-time.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"area":   map[string]any{"type": "string", "description": "channel name"},
+					"since":  map[string]any{"type": "integer", "description": "return only messages with # greater than this (default 0 = all)"},
+					"target": map[string]any{"type": "string", "description": "optional: only messages directed at this label (plus broadcasts)"},
+				},
+				"required": []any{"area"},
+			},
+		},
+		{
+			"name":        "promote",
+			"description": "Promote a channel message to durable semantic memory (remember), e.g. a decision or an answer worth keeping. The message stays in the channel; a memory is also created.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"area": map[string]any{"type": "string", "description": "channel name"},
+					"seq":  map[string]any{"type": "integer", "description": "the message # to promote"},
+					"tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional tags for the memory"},
+				},
+				"required": []any{"area", "seq"},
+			},
+		},
+		{
 			"name":        "stats",
 			"description": "Return how many events are stored in the journal.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
@@ -484,6 +534,80 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			return s.toolText(req.ID, fmt.Sprintf("forgot memory #%d (removed from recall; still in the journal history)", id))
 		}
 		return s.toolText(req.ID, fmt.Sprintf("memory #%d not found for this tenant", id))
+	case "post":
+		area, _ := strArg(p.Args, "area")
+		from, _ := strArg(p.Args, "from")
+		text, _ := strArg(p.Args, "text")
+		if area == "" || from == "" || text == "" {
+			return s.toolErr(req.ID, "provide 'area', 'from' and 'text' to post")
+		}
+		kind, _ := strArg(p.Args, "kind")
+		target, _ := strArg(p.Args, "target")
+		ref := uintArg(p.Args, "ref")
+		s.mu.Lock()
+		seq, err := s.chat.Post(tenant, comms.MessagePayload{Area: area, From: from, Kind: kind, Text: text, Target: target, Ref: ref})
+		s.mu.Unlock()
+		if err != nil {
+			return s.toolErr(req.ID, "post failed: "+err.Error())
+		}
+		s.moko.Info("post", map[string]string{"tenant": fmt.Sprint(tenant), "area": area, "from": from, "seq": fmt.Sprint(seq)})
+		return s.toolText(req.ID, fmt.Sprintf("posted message #%d in %s", seq, area))
+	case "read":
+		area, _ := strArg(p.Args, "area")
+		if area == "" {
+			return s.toolErr(req.ID, "provide 'area' to read")
+		}
+		since := uintArg(p.Args, "since")
+		target, _ := strArg(p.Args, "target")
+		msgs := s.chat.Read(tenant, area, since)
+		const readCap = 100
+		if len(msgs) > readCap {
+			msgs = msgs[len(msgs)-readCap:]
+		}
+		var b strings.Builder
+		var last uint64 = since
+		n := 0
+		for _, m := range msgs {
+			if target != "" && m.Target != "" && m.Target != target {
+				continue // filter: keep broadcasts + those addressed to target
+			}
+			to := m.Target
+			if to == "" {
+				to = "all"
+			}
+			fmt.Fprintf(&b, "#%d [%s] %s→%s: %s\n", m.Seq, m.Kind, m.From, to, m.Text)
+			if m.Seq > last {
+				last = m.Seq
+			}
+			n++
+		}
+		if n == 0 {
+			return s.toolText(req.ID, fmt.Sprintf("no new messages in %s since #%d", area, since))
+		}
+		fmt.Fprintf(&b, "(cursor: #%d)", last)
+		return s.toolText(req.ID, b.String())
+	case "promote":
+		if s.mem == nil {
+			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
+		}
+		area, _ := strArg(p.Args, "area")
+		seq := uintArg(p.Args, "seq")
+		if area == "" || seq == 0 {
+			return s.toolErr(req.ID, "provide 'area' and 'seq' to promote")
+		}
+		m, ok := s.chat.Get(tenant, area, seq)
+		if !ok {
+			return s.toolErr(req.ID, fmt.Sprintf("message #%d not found in %s", seq, area))
+		}
+		tags := append(stringsArg(p.Args, "tags"), "promoted")
+		s.mu.Lock()
+		id, _, _, err := s.mem.Remember(tenant, fmt.Sprintf("[%s %s#%d] %s", m.From, area, seq, m.Text), memory.RememberOpts{Tags: tags, Src: "promote"})
+		s.mu.Unlock()
+		if err != nil {
+			return s.toolErr(req.ID, "promote failed: "+err.Error())
+		}
+		s.moko.Info("promote", map[string]string{"tenant": fmt.Sprint(tenant), "area": area, "seq": fmt.Sprint(seq), "memid": fmt.Sprint(id)})
+		return s.toolText(req.ID, fmt.Sprintf("promoted message #%d in %s → memory #%d", seq, area, id))
 	case "stats":
 		return s.toolText(req.ID, fmt.Sprintf("journal holds %d events", s.store.ReadNextSeq()-1))
 	default:

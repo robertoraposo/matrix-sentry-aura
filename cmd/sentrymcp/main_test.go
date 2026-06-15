@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"matrixsentry/comms"
 	"matrixsentry/memory"
 	"matrixsentry/mokoblinks"
 	"matrixsentry/sentry"
@@ -174,6 +175,11 @@ func newMemServer(t *testing.T) *server {
 		t.Fatal(err)
 	}
 	s.mem = mem
+	chat, err := comms.New(s.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.chat = chat
 	return s
 }
 
@@ -345,5 +351,34 @@ func TestBoolArg(t *testing.T) {
 	}
 	if boolArg(map[string]any{"force": "yes"}, "force") {
 		t.Fatal("non-bool should be false")
+	}
+}
+
+func TestCommsPostReadPromote(t *testing.T) {
+	s := newMemServer(t) // *server with mem + chat over a temp journal, default tenant 1
+	post := func(area, from, text string) rpcReq {
+		args, _ := json.Marshal(map[string]any{"name": "post", "arguments": map[string]any{"area": area, "from": from, "text": text}})
+		return rpcReq{ID: json.RawMessage("1"), Method: "tools/call", Params: args}
+	}
+	textOf := func(r rpcResp) string { b, _ := json.Marshal(r.Result); return string(b) }
+
+	// post in tenant 1, read it back
+	if got := textOf(s.callTool(post("proj/x", "be", "schema ready"), 1)); !strings.Contains(got, "#") {
+		t.Fatalf("post did not return a seq: %s", got)
+	}
+	readArgs, _ := json.Marshal(map[string]any{"name": "read", "arguments": map[string]any{"area": "proj/x", "since": 0}})
+	got1 := textOf(s.callTool(rpcReq{ID: json.RawMessage("1"), Method: "tools/call", Params: readArgs}, 1))
+	if !strings.Contains(got1, "schema ready") || !strings.Contains(got1, "be") {
+		t.Fatalf("read missing the message: %s", got1)
+	}
+	// tenant 2 must NOT see tenant 1's channel
+	got2 := textOf(s.callTool(rpcReq{ID: json.RawMessage("1"), Method: "tools/call", Params: readArgs}, 2))
+	if strings.Contains(got2, "schema ready") {
+		t.Fatalf("tenant 2 saw tenant 1's channel: %s", got2)
+	}
+	// missing area → tool error
+	badArgs, _ := json.Marshal(map[string]any{"name": "post", "arguments": map[string]any{"from": "be", "text": "x"}})
+	if got := textOf(s.callTool(rpcReq{ID: json.RawMessage("1"), Method: "tools/call", Params: badArgs}, 1)); !strings.Contains(strings.ToLower(got), "area") {
+		t.Fatalf("missing area should error mentioning area: %s", got)
 	}
 }
