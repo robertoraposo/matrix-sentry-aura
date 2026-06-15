@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"time"
@@ -89,6 +90,35 @@ func (a *apiServer) handleGalaxy(w http.ResponseWriter, r *http.Request) {
 func (a *apiServer) handleComms(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"columns":[],"agents":[]}`))
+}
+
+// handleJournal proxies the tenant's recent semantic journal events from the
+// MCP (server-side, with the bearer) straight through to the dashboard.
+func (a *apiServer) handleJournal(w http.ResponseWriter, r *http.Request) {
+	limit := r.URL.Query().Get("limit")
+	url := a.mcpURL + "/admin/journal"
+	if limit != "" {
+		url += "?limit=" + limit
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadGateway)
+		return
+	}
+	if a.token != "" {
+		req.Header.Set("Authorization", "Bearer "+a.token)
+	}
+	resp, err := a.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		http.Error(w, `{"error":"upstream"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	io.Copy(w, resp.Body)
 }
 
 type galaxyPoint struct {

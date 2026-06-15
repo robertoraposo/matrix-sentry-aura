@@ -104,3 +104,43 @@ func TestAPIGalaxyTenantObject(t *testing.T) {
 		t.Fatalf("tenant object not populated: %+v", d.Tenant)
 	}
 }
+
+func TestAPIJournalPassThrough(t *testing.T) {
+	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/admin/journal" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`{"events":[{"seq":7,"ts":1,"type":"Memory","text":"#7 hi"}]}`))
+	}))
+	defer mcp.Close()
+	srv := &apiServer{mcpURL: mcp.URL, token: "x", client: http.DefaultClient}
+	rec := httptest.NewRecorder()
+	srv.handleJournal(rec, httptest.NewRequest(http.MethodGet, "/api/journal?tenant=personal", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var d struct {
+		Events []struct {
+			Seq  int    `json:"seq"`
+			Type string `json:"type"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Events) != 1 || d.Events[0].Seq != 7 || d.Events[0].Type != "Memory" {
+		t.Fatalf("passthrough wrong: %+v", d.Events)
+	}
+}
+
+func TestAPIJournalUpstreamErrorIs502(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer bad.Close()
+	srv := &apiServer{mcpURL: bad.URL, token: "x", client: http.DefaultClient}
+	rec := httptest.NewRecorder()
+	srv.handleJournal(rec, httptest.NewRequest(http.MethodGet, "/api/journal?tenant=personal", nil))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("want 502, got %d", rec.Code)
+	}
+}
