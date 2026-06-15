@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    *{box-sizing:border-box}
+    html,body{margin:0;height:100%;background:#05070f;color-scheme:dark;overflow:hidden}
+    body{font-family:'Space Grotesk',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+    ::selection{background:rgba(53,230,255,.3)}
+    @keyframes mxtype{from{width:0}}
+    @keyframes mxblink{50%{border-color:transparent}}
+    @keyframes mxspin{to{transform:rotate(360deg)}}
+    @keyframes mxpulse{0%,100%{opacity:.35;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
+    @keyframes mxrise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+    @keyframes mxglow{0%,100%{filter:drop-shadow(0 0 6px currentColor)}50%{filter:drop-shadow(0 0 14px currentColor)}}
+    ::-webkit-scrollbar{width:7px;height:7px}
+    ::-webkit-scrollbar-thumb{background:rgba(120,170,255,.16);border-radius:8px}
+    ::-webkit-scrollbar-thumb:hover{background:rgba(120,170,255,.3)}
+    ::-webkit-scrollbar-track{background:transparent}
+    input::placeholder{color:#4b5572}
+  </style>
+</helmet>
+<div data-screen-label="Matrix Sentry" style="position:fixed;inset:0;overflow:hidden;background:radial-gradient(140% 110% at 50% -10%,#0a1226 0%,#05070f 55%,#03040a 100%);font-family:'Space Grotesk',sans-serif;color:#e8eef8">
+
+  <canvas ref="{{ canvasRef }}" style="position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;cursor:grab"></canvas>
+  <div ref="{{ layerRef }}" style="position:absolute;inset:0;z-index:1;pointer-events:none;overflow:hidden"></div>
+
+  <!-- vignette + grain -->
+  <div style="position:absolute;inset:0;z-index:2;pointer-events:none;background:radial-gradient(120% 90% at 50% 45%,transparent 45%,rgba(3,4,10,.55) 100%);mix-blend-mode:multiply"></div>
+  <div style="position:absolute;inset:0;z-index:2;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(255,255,255,.012) 0px,rgba(255,255,255,.012) 1px,transparent 1px,transparent 3px);opacity:.5"></div>
+
+  <!-- split isolation side labels -->
+  <sc-if value="{{ splitB }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;z-index:3;left:6%;top:50%;transform:translateY(-50%);pointer-events:none;text-align:center">
+      <div style="font:700 12px 'JetBrains Mono';letter-spacing:.2em;color:#35E6FF;text-transform:uppercase;opacity:.85">corpus a</div>
+      <div style="font:700 22px 'Space Grotesk';color:#dbe8fb;margin-top:4px;text-shadow:0 0 20px rgba(53,230,255,.4)">{{ currentTenantName }}</div>
+    </div>
+    <div style="position:absolute;z-index:3;right:6%;top:50%;transform:translateY(-50%);pointer-events:none;text-align:center">
+      <div style="font:700 12px 'JetBrains Mono';letter-spacing:.2em;color:#FF3DCB;text-transform:uppercase;opacity:.85">corpus b</div>
+      <div style="font:700 22px 'Space Grotesk';color:#fbe0f3;margin-top:4px;text-shadow:0 0 20px rgba(255,61,203,.4)">{{ splitBName }}</div>
+    </div>
+    <div style="position:absolute;z-index:3;left:50%;top:90px;transform:translateX(-50%);pointer-events:none;display:flex;align-items:center;gap:9px;padding:7px 15px;border-radius:999px;background:rgba(8,12,22,.6);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(120,180,255,.16)">
+      <span style="width:7px;height:7px;border-radius:50%;background:#FFB23E;box-shadow:0 0 10px #FFB23E;animation:mxpulse 1.8s infinite"></span>
+      <span style="font:600 11px 'Space Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#ffd79a">Aislamiento activo — los corpus no se ven entre sí</span>
+    </div>
+  </sc-if>
+
+  <!-- ░░ TOP BAR ░░ -->
+  <div style="position:absolute;top:0;left:0;right:0;z-index:10;height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;background:linear-gradient(180deg,rgba(8,11,20,.86),rgba(8,11,20,.36));-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-bottom:1px solid rgba(120,180,255,.08)">
+    <div style="display:flex;align-items:center;gap:13px">
+      <div style="position:relative;width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:conic-gradient(from 210deg,#35E6FF,#9B6CFF,#FF3DCB,#FFB23E,#35E6FF);box-shadow:0 0 18px rgba(53,230,255,.35)">
+        <div style="width:26px;height:26px;border-radius:7px;background:#05070f;display:grid;place-items:center;font:700 13px 'Space Grotesk';color:#dce6f5">MS</div>
+      </div>
+      <div style="line-height:1.05">
+        <div style="font:700 16px 'Space Grotesk';letter-spacing:.04em;color:#eef4fd">MATRIX<span style="color:#35E6FF"> SENTRY</span></div>
+        <div style="font:500 9.5px 'JetBrains Mono';letter-spacing:.18em;text-transform:uppercase;color:#5c6party;color:#5a6party;color:#56607a;margin-top:1px">semantic memory engine</div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:4px;padding:4px;border-radius:12px;background:rgba(8,12,22,.5);border:1px solid rgba(120,180,255,.08)">
+      <button onClick="{{ setGalaxy }}" style="{{ galaxyTabStyle }}">⬡ Vector Galaxy</button>
+      <button onClick="{{ setComms }}" style="{{ commsTabStyle }}">⇄ Comms</button>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="display:flex;gap:5px">
+        <sc-for list="{{ tenantList }}" as="t" hint-placeholder-count="4">
+          <button onClick="{{ t.onSelect }}" style="{{ t.style }}">
+            <span style="color:{{ t.accent }}">{{ t.glyph }}</span>{{ t.name }}
+          </button>
+        </sc-for>
+      </div>
+      <button onClick="{{ onSplitClick }}" style="{{ splitBtnStyle }}">{{ splitLabel }}</button>
+    </div>
+  </div>
+
+  <!-- ░░ GALAXY VIEW ░░ -->
+  <sc-if value="{{ isGalaxy }}" hint-placeholder-val="{{ true }}">
+
+  <!-- LEFT — ACCESS CONTROL -->
+  <div style="position:absolute;z-index:9;top:72px;left:16px;bottom:16px;width:316px;display:flex;flex-direction:column;background:linear-gradient(180deg,rgba(16,22,38,.72),rgba(8,11,20,.66));-webkit-backdrop-filter:blur(20px) saturate(125%);backdrop-filter:blur(20px) saturate(125%);border:1px solid rgba(120,180,255,.10);border-radius:16px;box-shadow:0 18px 48px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.05);overflow:hidden">
+    <div style="padding:15px 16px 12px;border-bottom:1px solid rgba(120,180,255,.08)">
+      <div style="display:flex;align-items:center;gap:9px">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#35E6FF" stroke-width="2" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span style="font:600 12px 'Space Grotesk';letter-spacing:.14em;text-transform:uppercase;color:#cdd9ec">Control de acceso</span>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:13px;padding:8px 11px;border-radius:10px;background:rgba(8,12,22,.5);border:1px solid rgba(120,180,255,.07)">
+        <div>
+          <div style="font:600 12px 'Space Grotesk';color:#dce6f5">Teams-only</div>
+          <div style="font:500 9.5px 'JetBrains Mono';color:#56607a;letter-spacing:.04em">solo llaves de equipo</div>
+        </div>
+        <button onClick="{{ toggleTeams }}" style="{{ teamsSwitchStyle }}"><span style="{{ teamsKnobStyle }}"></span></button>
+      </div>
+    </div>
+
+    <div style="flex:1;overflow-y:auto;padding:12px 13px;display:flex;flex-direction:column;gap:9px">
+      <sc-for list="{{ keys }}" as="k" hint-placeholder-count="5">
+        <div style="padding:11px 12px;border-radius:12px;background:rgba(10,14,26,.5);border:1px solid rgba(120,180,255,.08);position:relative;overflow:hidden">
+          <div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:{{ k.accent }}"></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <span style="font:600 12px 'JetBrains Mono';color:#e3ecf8">{{ k.name }}</span>
+            <span style="{{ k.modeStyle }}">{{ k.mode }}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:7px;margin-top:9px;padding:6px 9px;border-radius:8px;background:rgba(5,8,16,.6);border:1px solid rgba(120,180,255,.06)">
+            <span style="flex:1;font:500 11px 'JetBrains Mono';color:#8fa0bd;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ k.secret }}</span>
+            <button onClick="{{ k.onCopy }}" style="flex:none;display:flex;align-items:center;gap:4px;padding:3px 7px;border-radius:6px;border:1px solid rgba(120,180,255,.14);background:rgba(53,230,255,.06);color:{{ k.copyColor }};font:600 9.5px 'Space Grotesk';cursor:pointer">{{ k.copyLabel }}</button>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-top:9px">
+            <span style="display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;background:{{ k.accentSoft }};border:1px solid {{ k.accentBorder }}">
+              <span style="width:5px;height:5px;border-radius:50%;background:{{ k.accent }}"></span>
+              <span style="font:600 9.5px 'Space Grotesk';color:{{ k.accent }};letter-spacing:.03em">aislado → {{ k.tenant }}</span>
+            </span>
+            <span style="font:500 9.5px 'JetBrains Mono';color:#56607a">{{ k.last }}</span>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+
+    <!-- OAuth flow -->
+    <div style="padding:12px 14px;border-top:1px solid rgba(120,180,255,.08)">
+      <div style="font:600 9.5px 'Space Grotesk';letter-spacing:.14em;text-transform:uppercase;color:#56607a;margin-bottom:9px">Flujo OAuth · claim de tenant</div>
+      <div style="display:flex;align-items:center;gap:5px">
+        <div style="flex:1;text-align:center;padding:7px 4px;border-radius:9px;background:rgba(155,108,255,.1);border:1px solid rgba(155,108,255,.25)">
+          <div style="font:600 10px 'Space Grotesk';color:#c4b0ff">Consent</div>
+          <div style="font:500 8px 'JetBrains Mono';color:#7a6db0;margin-top:1px">scopes mín.</div>
+        </div>
+        <span style="color:#56607a;font-size:13px">→</span>
+        <div style="flex:1.2;text-align:center;padding:7px 4px;border-radius:9px;background:rgba(53,230,255,.1);border:1px solid rgba(53,230,255,.28)">
+          <div style="font:600 10px 'Space Grotesk';color:#8fe9ff">Token</div>
+          <div style="font:500 8px 'JetBrains Mono';color:#5b94a8;margin-top:1px">tenant:•••</div>
+        </div>
+        <span style="color:#56607a;font-size:13px">→</span>
+        <div style="flex:1;text-align:center;padding:7px 4px;border-radius:9px;background:rgba(52,229,160,.1);border:1px solid rgba(52,229,160,.25)">
+          <div style="font:600 10px 'Space Grotesk';color:#7bf0c0">Recall</div>
+          <div style="font:500 8px 'JetBrains Mono';color:#4f9c7d;margin-top:1px">enrutado</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTER COLUMN -->
+  <div style="position:absolute;z-index:8;top:72px;bottom:16px;left:348px;right:380px;display:flex;flex-direction:column;pointer-events:none">
+    <!-- metrics strip -->
+    <div style="display:flex;gap:10px;pointer-events:auto">
+      <div style="display:flex;align-items:center;gap:11px;padding:11px 14px;border-radius:14px;background:linear-gradient(180deg,rgba(11,16,29,.82),rgba(7,10,18,.74));-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);border:1px solid rgba(120,180,255,.10)">
+        <div style="position:relative;width:46px;height:46px">
+          <svg width="46" height="46" viewBox="0 0 46 46" style="transform:rotate(-90deg)">
+            <circle cx="23" cy="23" r="20" fill="none" stroke="rgba(120,180,255,.12)" stroke-width="4"/>
+            <circle cx="23" cy="23" r="20" fill="none" stroke="#35E6FF" stroke-width="4" stroke-linecap="round" stroke-dasharray="125.66" stroke-dashoffset="{{ metrics.recallDash }}" style="filter:drop-shadow(0 0 5px rgba(53,230,255,.7));transition:stroke-dashoffset .2s"/>
+          </svg>
+          <div style="position:absolute;inset:0;display:grid;place-items:center;font:700 11px 'JetBrains Mono';color:#cdeafd">{{ metrics.recallStr }}</div>
+        </div>
+        <div>
+          <div style="font:600 9px 'Space Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#56607a">recall@10</div>
+          <div style="font:700 16px 'JetBrains Mono';color:#eef4fd;margin-top:1px">{{ metrics.recallPct }}<span style="font-size:11px;color:#8fa0bd">%</span></div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:12px;padding:11px 15px;border-radius:14px;background:linear-gradient(180deg,rgba(11,16,29,.82),rgba(7,10,18,.74));-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);border:1px solid rgba(120,180,255,.10)">
+        <div>
+          <div style="font:600 9px 'Space Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#56607a">latencia recall</div>
+          <div style="font:700 16px 'JetBrains Mono';color:#7bf0c0;margin-top:1px">{{ metrics.latencyStr }}<span style="font-size:11px;color:#4f9c7d">ms</span></div>
+        </div>
+        <svg width="74" height="30" viewBox="0 0 74 30" style="overflow:visible">
+          <polyline points="0,22 9,18 18,24 27,12 36,16 45,8 54,14 63,6 72,10" fill="none" stroke="#34E5A0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="filter:drop-shadow(0 0 4px rgba(52,229,160,.5))"/>
+          <circle cx="72" cy="10" r="2.6" fill="#7bf0c0" style="animation:mxpulse 1.6s infinite;filter:drop-shadow(0 0 5px #34E5A0)"/>
+        </svg>
+      </div>
+
+      <div style="flex:1;display:flex;gap:10px">
+        <div style="flex:1;padding:11px 14px;border-radius:14px;background:linear-gradient(180deg,rgba(11,16,29,.82),rgba(7,10,18,.74));-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);border:1px solid rgba(120,180,255,.10)">
+          <div style="font:600 9px 'Space Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#56607a">memorias</div>
+          <div style="font:700 18px 'JetBrains Mono';color:#eef4fd;margin-top:2px">{{ metrics.memoriesStr }}</div>
+        </div>
+        <div style="flex:1;padding:11px 14px;border-radius:14px;background:linear-gradient(180deg,rgba(11,16,29,.82),rgba(7,10,18,.74));-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);border:1px solid rgba(120,180,255,.10)">
+          <div style="font:600 9px 'Space Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#56607a">clientes</div>
+          <div style="display:flex;align-items:baseline;gap:6px;margin-top:2px"><span style="font:700 18px 'JetBrains Mono';color:#ffd79a">{{ metrics.clients }}</span><span style="width:6px;height:6px;border-radius:50%;background:#34E5A0;box-shadow:0 0 8px #34E5A0;animation:mxpulse 2s infinite"></span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- recall bar -->
+    <div style="margin-top:13px;display:flex;justify-content:center;pointer-events:none">
+      <div style="display:flex;align-items:center;gap:9px;width:min(560px,100%);padding:8px 8px 8px 16px;border-radius:14px;background:linear-gradient(180deg,rgba(16,22,38,.74),rgba(8,11,20,.62));-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);border:1px solid rgba(53,230,255,.18);box-shadow:0 12px 40px rgba(0,0,0,.45),0 0 24px rgba(53,230,255,.08);pointer-events:auto">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#35E6FF" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input ref="{{ recallInputRef }}" onKeyDown="{{ onRecallKey }}" placeholder="Escribe una consulta de recall — p. ej. &quot;rollback de deploy&quot;…" style="flex:1;background:none;border:none;outline:none;color:#e8eef8;font:500 13.5px 'Space Grotesk'"/>
+        <button onClick="{{ doRecall }}" style="flex:none;display:flex;align-items:center;gap:7px;padding:8px 15px;border-radius:10px;border:none;cursor:pointer;background:linear-gradient(180deg,#35E6FF,#1aa6c4);color:#03121a;font:700 12px 'Space Grotesk';box-shadow:0 4px 16px rgba(53,230,255,.3)">Recall <span style="font:600 11px 'JetBrains Mono';opacity:.7">⏎</span></button>
+      </div>
+    </div>
+
+    <div style="flex:1"></div>
+
+    <!-- JOURNAL -->
+    <div style="height:188px;display:flex;flex-direction:column;border-radius:14px;background:linear-gradient(180deg,rgba(10,14,24,.78),rgba(6,9,16,.72));-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);border:1px solid rgba(120,180,255,.10);box-shadow:0 18px 48px rgba(0,0,0,.5);overflow:hidden;pointer-events:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid rgba(120,180,255,.08)">
+        <div style="display:flex;align-items:center;gap:9px">
+          <span style="width:7px;height:7px;border-radius:50%;background:#34E5A0;box-shadow:0 0 9px #34E5A0;animation:mxpulse 1.6s infinite"></span>
+          <span style="font:600 11px 'Space Grotesk';letter-spacing:.14em;text-transform:uppercase;color:#cdd9ec">Journal</span>
+          <span style="font:500 9.5px 'JetBrains Mono';color:#56607a">append-only · ts monótono</span>
+        </div>
+        <div style="display:flex;gap:13px;font:500 9.5px 'JetBrains Mono';color:#56607a">
+          <span><span style="color:#35E6FF">●</span> access</span>
+          <span><span style="color:#34E5A0">●</span> memory</span>
+          <span><span style="color:#FFB23E">●</span> forget</span>
+          <span><span style="color:#9B6CFF">●</span> message</span>
+        </div>
+      </div>
+      <div ref="{{ journalRef }}" style="flex:1;overflow-y:auto;padding:8px 14px 10px">
+        <sc-for list="{{ journalItems }}" as="ev" hint-placeholder-count="6">
+          <div style="display:flex;gap:11px;align-items:baseline;padding:1.5px 0;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.5;animation:mxrise .22s ease both">
+            <span style="color:#46506b;flex:none">{{ ev.time }}</span>
+            <span style="{{ ev.tagStyle }}">{{ ev.type }}</span>
+            <span style="{{ ev.msgStyle }}">{{ ev.text }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT — INSPECTOR -->
+  <div style="position:absolute;z-index:9;top:72px;right:16px;bottom:16px;width:352px;display:flex;flex-direction:column;background:linear-gradient(180deg,rgba(16,22,38,.72),rgba(8,11,20,.66));-webkit-backdrop-filter:blur(20px) saturate(125%);backdrop-filter:blur(20px) saturate(125%);border:1px solid rgba(120,180,255,.10);border-radius:16px;box-shadow:0 18px 48px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.05);overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:15px 16px 12px;border-bottom:1px solid rgba(120,180,255,.08)">
+      <div style="display:flex;align-items:center;gap:9px">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FF3DCB" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <span style="font:600 12px 'Space Grotesk';letter-spacing:.14em;text-transform:uppercase;color:#cdd9ec">Inspector</span>
+      </div>
+      <sc-if value="{{ hasAnySel }}" hint-placeholder-val="{{ false }}">
+        <button onClick="{{ clearSel }}" style="padding:4px 9px;border-radius:7px;border:1px solid rgba(120,180,255,.14);background:rgba(120,180,255,.05);color:#8fa0bd;font:600 10px 'Space Grotesk';cursor:pointer">limpiar</button>
+      </sc-if>
+    </div>
+
+    <div style="flex:1;overflow-y:auto;padding:16px">
+      <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ true }}">
+        <div style="height:100%;min-height:340px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:14px;padding:20px">
+          <div style="width:60px;height:60px;border-radius:50%;border:1px dashed rgba(120,180,255,.25);display:grid;place-items:center;animation:mxglow 3s infinite;color:#35E6FF">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#35E6FF" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9" opacity=".4"/></svg>
+          </div>
+          <div>
+            <div style="font:600 14px 'Space Grotesk';color:#cdd9ec">Selecciona un nodo</div>
+            <div style="font:500 12px 'Space Grotesk';color:#56607a;margin-top:5px;line-height:1.5;max-width:220px">Haz clic en una memoria de la galaxia, o lanza una consulta de recall arriba.</div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isMemory }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:{{ sel.colorSoft }};border:1px solid {{ sel.colorBorder }}">
+            <span style="width:6px;height:6px;border-radius:50%;background:{{ sel.color }};box-shadow:0 0 8px {{ sel.color }}"></span>
+            <span style="font:600 10px 'Space Grotesk';letter-spacing:.08em;text-transform:uppercase;color:{{ sel.color }}">{{ sel.clusterLabel }}</span>
+          </span>
+          <span style="font:600 10px 'JetBrains Mono';color:#56607a">{{ sel.dim }}-d · {{ sel.id }}</span>
+        </div>
+        <div style="margin-top:13px;font:500 15.5px/1.5 'Space Grotesk';color:#eef4fd;text-wrap:pretty">{{ sel.text }}</div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:15px">
+          <div style="padding:9px 11px;border-radius:10px;background:rgba(8,12,22,.5);border:1px solid rgba(120,180,255,.07)">
+            <div style="font:600 8.5px 'Space Grotesk';letter-spacing:.1em;text-transform:uppercase;color:#56607a">fuente</div>
+            <div style="font:600 12px 'JetBrains Mono';color:#cdd9ec;margin-top:2px">{{ sel.source }}</div>
+          </div>
+          <div style="padding:9px 11px;border-radius:10px;background:rgba(8,12,22,.5);border:1px solid rgba(120,180,255,.07)">
+            <div style="font:600 8.5px 'Space Grotesk';letter-spacing:.1em;text-transform:uppercase;color:#56607a">accesos</div>
+            <div style="font:600 12px 'JetBrains Mono';color:#ffd79a;margin-top:2px">{{ sel.access }}</div>
+          </div>
+          <div style="padding:9px 11px;border-radius:10px;background:rgba(8,12,22,.5);border:1px solid rgba(120,180,255,.07)">
+            <div style="font:600 8.5px 'Space Grotesk';letter-spacing:.1em;text-transform:uppercase;color:#56607a">creado</div>
+            <div style="font:600 12px 'JetBrains Mono';color:#cdd9ec;margin-top:2px">{{ sel.created }}</div>
+          </div>
+          <div style="padding:9px 11px;border-radius:10px;background:rgba(8,12,22,.5);border:1px solid rgba(120,180,255,.07)">
+            <div style="font:600 8.5px 'Space Grotesk';letter-spacing:.1em;text-transform:uppercase;color:#56607a">vecino +cercano</div>
+            <div style="font:600 12px 'JetBrains Mono';color:#8fe9ff;margin-top:2px">d={{ sel.nearest }}</div>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:13px">
+          <sc-for list="{{ sel.tags }}" as="tag" hint-placeholder-count="2">
+            <span style="padding:3px 9px;border-radius:6px;background:rgba(120,180,255,.07);border:1px solid rgba(120,180,255,.1);font:500 10.5px 'JetBrains Mono';color:#9fb0cd">#{{ tag }}</span>
+          </sc-for>
+        </div>
+
+        <div style="font:600 9.5px 'Space Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#56607a;margin:18px 0 9px">Vecinos más cercanos · k=8</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <sc-for list="{{ sel.neighbors }}" as="n" hint-placeholder-count="8">
+            <button onClick="{{ n.onSelect }}" style="display:block;width:100%;text-align:left;padding:8px 10px;border-radius:9px;background:rgba(8,12,22,.45);border:1px solid rgba(120,180,255,.07);cursor:pointer">
+              <div style="display:flex;align-items:center;gap:7px">
+                <span style="width:6px;height:6px;border-radius:50%;flex:none;background:{{ n.color }};box-shadow:0 0 7px {{ n.color }}"></span>
+                <span style="flex:1;font:500 11.5px 'Space Grotesk';color:#c4d2e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ n.text }}</span>
+                <span style="flex:none;font:600 10px 'JetBrains Mono';color:#8fe9ff">{{ n.distStr }}</span>
+              </div>
+              <div style="margin-top:6px;height:3px;border-radius:3px;background:rgba(120,180,255,.1);overflow:hidden">
+                <div style="height:100%;width:{{ n.barPct }}%;background:linear-gradient(90deg,#35E6FF,#9B6CFF);border-radius:3px"></div>
+              </div>
+            </button>
+          </sc-for>
+        </div>
+
+        <div style="display:flex;gap:7px;margin-top:18px">
+          <button onClick="{{ sel.onRecall }}" style="flex:1;padding:10px;border-radius:10px;border:1px solid rgba(53,230,255,.3);background:rgba(53,230,255,.1);color:#8fe9ff;font:600 11.5px 'Space Grotesk';cursor:pointer">↻ Recall</button>
+          <button onClick="{{ sel.onPromote }}" style="flex:1;padding:10px;border-radius:10px;border:1px solid rgba(52,229,160,.3);background:rgba(52,229,160,.1);color:#7bf0c0;font:600 11.5px 'Space Grotesk';cursor:pointer">▲ Promote</button>
+          <button onClick="{{ sel.onForget }}" style="flex:1;padding:10px;border-radius:10px;border:1px solid rgba(255,107,139,.3);background:rgba(255,107,139,.1);color:#ff9bae;font:600 11.5px 'Space Grotesk';cursor:pointer">⊘ Forget</button>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isQuery }}" hint-placeholder-val="{{ false }}">
+        <div style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:rgba(53,230,255,.1);border:1px solid rgba(53,230,255,.28)">
+          <span style="width:6px;height:6px;border-radius:50%;background:#35E6FF;box-shadow:0 0 8px #35E6FF;animation:mxpulse 1.4s infinite"></span>
+          <span style="font:600 10px 'Space Grotesk';letter-spacing:.08em;text-transform:uppercase;color:#8fe9ff">Consulta de recall</span>
+        </div>
+        <div style="margin-top:13px;padding:13px 15px;border-radius:12px;background:rgba(53,230,255,.06);border:1px solid rgba(53,230,255,.14);font:500 14.5px/1.5 'Space Grotesk';color:#dcebf5;color:#d6e7f7;text-wrap:pretty">“{{ selQ.text }}”</div>
+        <div style="font:600 9.5px 'Space Grotesk';letter-spacing:.12em;text-transform:uppercase;color:#56607a;margin:18px 0 9px">Vecinos recuperados · k=8</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <sc-for list="{{ selQ.neighbors }}" as="n" hint-placeholder-count="8">
+            <button onClick="{{ n.onSelect }}" style="display:block;width:100%;text-align:left;padding:8px 10px;border-radius:9px;background:rgba(8,12,22,.45);border:1px solid rgba(120,180,255,.07);cursor:pointer">
+              <div style="display:flex;align-items:center;gap:7px">
+                <span style="width:6px;height:6px;border-radius:50%;flex:none;background:{{ n.color }};box-shadow:0 0 7px {{ n.color }}"></span>
+                <span style="flex:1;font:500 11.5px 'Space Grotesk';color:#c4d2e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ n.text }}</span>
+                <span style="flex:none;font:600 10px 'JetBrains Mono';color:#8fe9ff">{{ n.distStr }}</span>
+              </div>
+              <div style="margin-top:6px;height:3px;border-radius:3px;background:rgba(120,180,255,.1);overflow:hidden">
+                <div style="height:100%;width:{{ n.barPct }}%;background:linear-gradient(90deg,#35E6FF,#9B6CFF);border-radius:3px"></div>
+              </div>
+            </button>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ░░ COMMS VIEW ░░ -->
+  <sc-if value="{{ isComms }}" hint-placeholder-val="{{ false }}">
+  <div data-screen-label="Comms" style="position:absolute;z-index:8;top:72px;left:16px;right:16px;bottom:16px;display:flex;flex-direction:column;background:linear-gradient(180deg,rgba(12,17,30,.66),rgba(7,10,18,.6));-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:1px solid rgba(120,180,255,.10);border-radius:16px;box-shadow:0 18px 48px rgba(0,0,0,.5);overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:15px 18px;border-bottom:1px solid rgba(120,180,255,.08)">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font:700 14px 'Space Grotesk';color:#eef4fd">Canal de agentes</span>
+        <span style="font:500 11px 'JetBrains Mono';color:#56607a">{{ currentTenantName }} · por área</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:7px;font:500 10.5px 'JetBrains Mono';color:#7bf0c0"><span style="width:6px;height:6px;border-radius:50%;background:#34E5A0;box-shadow:0 0 8px #34E5A0;animation:mxpulse 1.7s infinite"></span>{{ agentCount }} agentes activos</div>
+    </div>
+    <div style="flex:1;overflow-x:auto;overflow-y:hidden;padding:16px;display:flex;gap:14px">
+      <sc-for list="{{ commsColumns }}" as="col" hint-placeholder-count="4">
+        <div style="flex:none;width:288px;display:flex;flex-direction:column;border-radius:14px;background:rgba(8,12,22,.45);border:1px solid rgba(120,180,255,.08);overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid rgba(120,180,255,.07)">
+            <div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:3px;background:{{ col.color }};box-shadow:0 0 9px {{ col.color }}"></span><span style="font:600 12px 'Space Grotesk';letter-spacing:.04em;color:#dce6f5;text-transform:uppercase">{{ col.label }}</span></div>
+            <span style="font:600 10px 'JetBrains Mono';color:#56607a">{{ col.count }}</span>
+          </div>
+          <div style="flex:1;overflow-y:auto;padding:11px;display:flex;flex-direction:column;gap:9px">
+            <sc-for list="{{ col.cards }}" as="c" hint-placeholder-count="4">
+              <div style="{{ c.wrapStyle }}">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+                  <span style="font:600 10.5px 'JetBrains Mono';color:#9fb0cd">{{ c.author }}</span>
+                  <span style="{{ c.typeStyle }}">{{ c.type }}</span>
+                </div>
+                <div style="margin-top:7px;font:500 12.5px/1.45 'Space Grotesk';color:#dce6f5;text-wrap:pretty">{{ c.text }}</div>
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-top:9px">
+                  <sc-if value="{{ c.target }}" hint-placeholder-val="{{ false }}"><span style="font:600 10px 'JetBrains Mono';color:#9B6CFF;padding:2px 7px;border-radius:6px;background:rgba(155,108,255,.1)">{{ c.target }}</span></sc-if>
+                  <span style="font:500 9.5px 'JetBrains Mono';color:#46506b;margin-left:auto">hace {{ c.mins }}m</span>
+                </div>
+                <sc-if value="{{ c.promotable }}" hint-placeholder-val="{{ false }}">
+                  <button onClick="{{ c.onPromote }}" style="margin-top:9px;width:100%;padding:6px;border-radius:8px;border:1px dashed rgba(52,229,160,.3);background:rgba(52,229,160,.06);color:#7bf0c0;font:600 10px 'Space Grotesk';cursor:pointer">▲ promover a memoria</button>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- hover dedup chip -->
+  <div ref="{{ hoverChipRef }}" style="position:absolute;z-index:30;pointer-events:none;opacity:0;transition:opacity .15s;max-width:260px;padding:9px 12px;border-radius:11px;background:rgba(8,12,22,.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(120,180,255,.16);box-shadow:0 10px 30px rgba(0,0,0,.5)"></div>
+
+  <!-- loading overlay -->
+  <sc-if value="{{ notReady }}" hint-placeholder-val="{{ true }}">
+    <div style="position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:radial-gradient(120% 100% at 50% 40%,#0a1226,#05070f)">
+      <div style="width:54px;height:54px;border-radius:50%;border:2px solid rgba(120,180,255,.12);border-top-color:#35E6FF;animation:mxspin 1s linear infinite"></div>
+      <div style="text-align:center">
+        <div style="font:700 15px 'Space Grotesk';letter-spacing:.04em;color:#cdd9ec">Inicializando galaxia vectorial</div>
+        <div style="font:500 11px 'JetBrains Mono';color:#56607a;margin-top:6px">proyectando embeddings · construyendo índice HNSW…</div>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = {
+      ready: false,
+      view: "galaxy",
+      tenant: "blazesphere",
+      splitArm: false,
+      splitB: null,
+      selected: null,
+      journal: [],
+      metrics: { memories: 0, clients: 0, tenants: 4, recall: 0, latency: 1.4 },
+      teamsOnly: true,
+      comms: null,
+      copiedId: null,
+    };
+    this.canvasRef = React.createRef();
+    this.layerRef = React.createRef();
+    this.hoverChipRef = React.createRef();
+    this.journalRef = React.createRef();
+    this.recallInputRef = React.createRef();
+    this._eid = 1;
+    this.vclock = Date.now();
+    this.lastQuery = "";
+
+    this.TENANTS = [
+      { key: "blazesphere", name: "BlazeSphere", glyph: "◆", accent: "#35E6FF" },
+      { key: "kuadre", name: "Kuadre", glyph: "▲", accent: "#FF3DCB" },
+      { key: "roundplay", name: "Round Play", glyph: "●", accent: "#9DEE4E" },
+      { key: "personal", name: "Personal", glyph: "✦", accent: "#FFB23E" },
+    ];
+    this.KEYS = [
+      { id: "k1", name: "blz_live_sphere", tenant: "BlazeSphere", accent: "#35E6FF", mode: "bearer", secret: "sk_live_••••••••3f9a", last: "hace 2 min" },
+      { id: "k2", name: "kuadre_prod", tenant: "Kuadre", accent: "#FF3DCB", mode: "oauth", secret: "oauth_••••••••a17c", last: "hace 11 min" },
+      { id: "k3", name: "roundplay_bot", tenant: "Round PlayGames", accent: "#9DEE4E", mode: "bearer", secret: "sk_live_••••••••7b22", last: "hace 1 h" },
+      { id: "k4", name: "personal_cli", tenant: "Personal", accent: "#FFB23E", mode: "oauth", secret: "oauth_••••••••e90d", last: "hace 4 h" },
+      { id: "k5", name: "ci_deployer", tenant: "BlazeSphere", accent: "#35E6FF", mode: "bearer", secret: "sk_live_••••••••11ef", last: "hace 22 s" },
+    ];
+  }
+
+  componentDidMount() { this._boot(); }
+  componentWillUnmount() {
+    this._dead = true;
+    clearTimeout(this._jt);
+    cancelAnimationFrame(this._mraf);
+    if (this.galaxy) this.galaxy.dispose();
+  }
+
+  loadScript(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error("load " + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  async _boot() {
+    const base = "https://cdn.jsdelivr.net/npm/three@0.137.0";
+    const urls = [
+      base + "/build/three.min.js",
+      base + "/examples/js/shaders/CopyShader.js",
+      base + "/examples/js/shaders/LuminosityHighPassShader.js",
+      base + "/examples/js/postprocessing/EffectComposer.js",
+      base + "/examples/js/postprocessing/RenderPass.js",
+      base + "/examples/js/postprocessing/ShaderPass.js",
+      base + "/examples/js/postprocessing/MaskPass.js",
+      base + "/examples/js/postprocessing/UnrealBloomPass.js",
+      base + "/examples/js/controls/OrbitControls.js",
+      "corpus.js",
+      "galaxy.js",
+    ];
+    try {
+      for (const u of urls) await this.loadScript(u);
+    } catch (e) { console.error(e); return; }
+    if (this._dead) return;
+
+    this.corpusData = window.MatrixCorpus.generate(this.state.tenant, 1800);
+    this.galaxy = new window.MatrixGalaxy(this.canvasRef.current, this.layerRef.current, {
+      onSelect: (d) => this._onSelect(d),
+      onRecall: (d) => this._onRecall(d),
+      onHover: (i) => this._onHover(i),
+    });
+    this.galaxy.setData(this.corpusData);
+    this.setState({ ready: true, comms: window.MatrixCorpus.comms(this.state.tenant) });
+    this._animateMetrics();
+    this._seedJournal();
+    this._tickJournal();
+  }
+
+  // ---- galaxy callbacks ----
+  _onSelect(d) {
+    this.setState({ selected: { kind: "memory", mem: d.mem, neighbors: d.neighbors } });
+    this.pushEvent("Access", d.mem.tenant + " select → \"" + this._trunc(d.mem.text, 40) + "\"");
+  }
+  _onRecall(d) {
+    this.setState({ selected: { kind: "query", text: this.lastQuery, neighbors: d.neighbors } });
+    this.pushEvent("Memory", "recall ok · " + d.neighbors.length + " vecinos · top d=" + d.neighbors[0].dist.toFixed(3));
+  }
+  _onHover(info) {
+    const el = this.hoverChipRef.current; if (!el) return;
+    if (!info) { el.style.opacity = 0; return; }
+    el.style.opacity = 1;
+    el.style.left = (info.x + 18) + "px";
+    el.style.top = (info.y + 18) + "px";
+    const dupTxt = info.dup
+      ? "⊘ " + info.dup + " duplicado" + (info.dup > 1 ? "s" : "") + " dentro de τ=" + this.galaxy.tau.toFixed(2)
+      : "sin duplicados en τ=" + this.galaxy.tau.toFixed(2);
+    const dupCol = info.dup ? "#FFB23E" : "#56607a";
+    el.innerHTML =
+      '<div style="font:600 9px Space Grotesk;letter-spacing:.1em;text-transform:uppercase;color:' + info.mem.color + '">' + info.mem.clusterLabel + '</div>' +
+      '<div style="font:600 12px Space Grotesk;color:#dce6f5;margin-top:3px;line-height:1.35">' + this._esc(this._trunc(info.mem.text, 52)) + '</div>' +
+      '<div style="font:600 9.5px JetBrains Mono;color:' + dupCol + ';margin-top:6px">' + dupTxt + '</div>';
+  }
+
+  // ---- actions ----
+  selectTenant(key) {
+    if (!this.galaxy) return;
+    if (this.state.splitArm && key !== this.state.tenant) {
+      const dataB = window.MatrixCorpus.generate(key, 1400);
+      this.galaxy.setData(this.corpusData, dataB);
+      const name = (this.TENANTS.find((t) => t.key === key) || {}).name;
+      this.setState({ splitB: key, splitArm: false, selected: null });
+      this.pushEvent("Memory", "split de aislamiento activado · " + name);
+      return;
+    }
+    if (key === this.state.tenant && !this.state.splitB) return;
+    this.corpusData = window.MatrixCorpus.generate(key, 1800);
+    this.galaxy.setData(this.corpusData);
+    this.setState({ tenant: key, splitB: null, splitArm: false, selected: null, comms: window.MatrixCorpus.comms(key) });
+    this._animateMetrics();
+    const name = (this.TENANTS.find((t) => t.key === key) || {}).name;
+    this.pushEvent("Access", "tenant → " + name + " · re-anclando corpus");
+  }
+  onSplitClick() {
+    if (this.state.splitB) {
+      this.galaxy.setData(this.corpusData);
+      this.setState({ splitB: null, splitArm: false });
+      this.pushEvent("Memory", "split cerrado · vista única");
+    } else {
+      this.setState({ splitArm: !this.state.splitArm });
+    }
+  }
+  toggleTeams() {
+    const v = !this.state.teamsOnly;
+    this.setState({ teamsOnly: v });
+    this.pushEvent("Access", "teams-only " + (v ? "ON" : "OFF"));
+  }
+  doRecall() {
+    const v = (this.recallInputRef.current && this.recallInputRef.current.value || "").trim();
+    if (!v || !this.galaxy) return;
+    this.lastQuery = v;
+    this.galaxy.runRecall(v);
+    this.pushEvent("Access", "recall(\"" + this._trunc(v, 32) + "\") → buscando k=8");
+  }
+  onRecallKey(e) { if (e.key === "Enter") this.doRecall(); }
+  clearSel() { this.setState({ selected: null }); if (this.galaxy) { this.galaxy._clearSelection(); this.galaxy.clearRecall(); } }
+  selectNeighbor(id) { if (this.galaxy) this.galaxy.selectById(id); }
+  recallFrom(id) { if (this.galaxy) { this.galaxy.selectById(id); this.pushEvent("Access", "recall desde memoria " + id); } }
+  forget(id) {
+    if (this.galaxy) this.galaxy.forget(id);
+    this.pushEvent("Forget", "tombstone " + id + " · GC en background");
+    this.setState({ selected: null });
+  }
+  promote(id) {
+    if (this.galaxy) this.galaxy.promote(id);
+    this.pushEvent("Memory", "promote-to-memory " + id + " · heat ↑");
+  }
+  copyKey(k) {
+    try { if (navigator.clipboard) navigator.clipboard.writeText(k.secret); } catch (e) {}
+    this.setState({ copiedId: k.id });
+    clearTimeout(this._copyT);
+    this._copyT = setTimeout(() => { if (!this._dead) this.setState({ copiedId: null }); }, 1300);
+  }
+
+  // ---- journal ----
+  _seedJournal() {
+    for (let i = 0; i < 8; i++) this.randomEvent(true);
+  }
+  _tickJournal() {
+    if (this._dead) return;
+    this.randomEvent(false);
+    this._jt = setTimeout(() => this._tickJournal(), 1000 + Math.random() * 1500);
+  }
+  randomEvent(seed) {
+    if (!this.corpusData) return;
+    const pts = this.corpusData.points;
+    const p = pts[Math.floor(Math.random() * pts.length)];
+    const agents = this.corpusData.tenant.agents;
+    const ag = agents[Math.floor(Math.random() * agents.length)];
+    const ag2 = agents[Math.floor(Math.random() * agents.length)];
+    const r = Math.random();
+    let type, text;
+    if (r < 0.52) { type = "Access"; text = ag + " recall → \"" + this._trunc(p.text, 42) + "\" d=" + (0.02 + Math.random() * 0.34).toFixed(3); }
+    else if (r < 0.74) { type = "Memory"; text = "nueva memoria [" + p.clusterLabel + "] " + p.dim + "-d · " + p.id; }
+    else if (r < 0.87) { type = "Forget"; text = "tombstone " + p.id + " (" + p.clusterLabel + ")"; }
+    else { type = "Message"; text = ag + " → " + ag2 + " @" + p.clusterLabel + ": " + this._trunc(p.text, 34); }
+    this.pushEvent(type, text, seed);
+  }
+  pushEvent(type, text, seed) {
+    const colors = { Access: "#35E6FF", Memory: "#34E5A0", Forget: "#FFB23E", Message: "#9B6CFF" };
+    this.vclock += seed ? 600 + Math.random() * 400 : 180 + Math.random() * 1500;
+    const d = new Date(this.vclock);
+    const pad = (n, l) => String(n).padStart(l || 2, "0");
+    const time = pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds()) + "." + pad(d.getMilliseconds(), 3);
+    const ev = { id: this._eid++, time, type, typeColor: colors[type], text };
+    const journal = this.state.journal.concat(ev).slice(-60);
+    this.setState({ journal }, () => {
+      const el = this.journalRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }
+
+  _animateMetrics() {
+    cancelAnimationFrame(this._mraf);
+    const target = { memories: this.corpusData.points.length, clients: 12 + Math.floor(Math.random() * 16), recall: 0.984 };
+    const start = performance.now(), dur = 1100;
+    const step = (now) => {
+      if (this._dead) return;
+      const t = Math.min(1, (now - start) / dur), e = 1 - Math.pow(1 - t, 3);
+      this.setState({ metrics: {
+        memories: target.memories * e,
+        clients: target.clients * e,
+        tenants: 4,
+        recall: target.recall * e,
+        latency: 1.4 - 0.7 * e,
+      } });
+      if (t < 1) this._mraf = requestAnimationFrame(step);
+    };
+    this._mraf = requestAnimationFrame(step);
+  }
+
+  // ---- helpers ----
+  _trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+  _esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  _timeAgo(ts) {
+    const m = Math.floor((Date.now() - ts) / 60000);
+    if (m < 60) return "hace " + m + " min";
+    const h = Math.floor(m / 60);
+    if (h < 24) return "hace " + h + " h";
+    return "hace " + Math.floor(h / 24) + " d";
+  }
+
+  renderVals() {
+    const st = this.state;
+    const m = st.metrics;
+    const tenantName = (k) => (this.TENANTS.find((t) => t.key === k) || {}).name || "";
+
+    // tab styles
+    const tab = (active) => active
+      ? "padding:7px 14px;border-radius:9px;border:none;cursor:pointer;font:600 12px 'Space Grotesk';background:linear-gradient(180deg,rgba(53,230,255,.18),rgba(53,230,255,.08));color:#bdeeff;box-shadow:inset 0 0 0 1px rgba(53,230,255,.3)"
+      : "padding:7px 14px;border-radius:9px;border:none;cursor:pointer;font:600 12px 'Space Grotesk';background:transparent;color:#7f8ca6";
+
+    // tenant pills
+    const tenantList = this.TENANTS.map((t) => {
+      const active = t.key === st.tenant && !st.splitB;
+      const isB = t.key === st.splitB;
+      let style = "display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:9px;cursor:pointer;font:600 11.5px 'Space Grotesk';transition:all .16s;";
+      if (active) style += "background:rgba(120,180,255,.1);border:1px solid " + t.accent + "55;color:#e8eef8;box-shadow:0 0 14px " + t.accent + "33";
+      else if (isB) style += "background:rgba(255,61,203,.1);border:1px solid #FF3DCB66;color:#fbe0f3";
+      else if (st.splitArm) style += "background:rgba(8,12,22,.5);border:1px dashed rgba(120,180,255,.3);color:#9fb0cd";
+      else style += "background:rgba(8,12,22,.4);border:1px solid rgba(120,180,255,.08);color:#8693ad";
+      return { name: t.name, glyph: t.glyph, accent: t.accent, style, onSelect: () => this.selectTenant(t.key) };
+    });
+
+    const splitLabel = st.splitB ? "✕ Cerrar split" : (st.splitArm ? "Elige 2º tenant…" : "⊟ Split");
+    const splitBtnStyle = (st.splitArm || st.splitB)
+      ? "padding:6px 12px;border-radius:9px;cursor:pointer;font:600 11.5px 'Space Grotesk';background:rgba(255,178,62,.12);border:1px solid #FFB23E66;color:#ffd79a"
+      : "padding:6px 12px;border-radius:9px;cursor:pointer;font:600 11.5px 'Space Grotesk';background:rgba(8,12,22,.4);border:1px solid rgba(120,180,255,.1);color:#8693ad";
+
+    // keys
+    const keys = this.KEYS.map((k) => {
+      const copied = st.copiedId === k.id;
+      const modeStyle = k.mode === "oauth"
+        ? "padding:2px 8px;border-radius:6px;font:700 9px 'JetBrains Mono';letter-spacing:.05em;text-transform:uppercase;background:rgba(155,108,255,.14);color:#c4b0ff;border:1px solid rgba(155,108,255,.25)"
+        : "padding:2px 8px;border-radius:6px;font:700 9px 'JetBrains Mono';letter-spacing:.05em;text-transform:uppercase;background:rgba(53,230,255,.12);color:#8fe9ff;border:1px solid rgba(53,230,255,.22)";
+      return {
+        name: k.name, mode: k.mode, secret: k.secret, last: k.last, accent: k.accent, tenant: k.tenant,
+        modeStyle,
+        accentSoft: this._hexA(k.accent, 0.1),
+        accentBorder: this._hexA(k.accent, 0.25),
+        copyLabel: copied ? "✓ copiado" : "copiar",
+        copyColor: copied ? "#7bf0c0" : "#8fe9ff",
+        onCopy: () => this.copyKey(k),
+      };
+    });
+
+    // selection
+    let sel = null, selQ = null;
+    const mkNeighbors = (arr) => arr.map((n) => ({
+      color: n.mem.color, text: this._trunc(n.mem.text, 50), distStr: n.dist.toFixed(3),
+      barPct: Math.max(10, Math.min(100, 100 - n.dist * 150)),
+      onSelect: () => this.selectNeighbor(n.mem.id),
+    }));
+    if (st.selected && st.selected.kind === "memory") {
+      const me = st.selected.mem;
+      const ns = st.selected.neighbors || [];
+      sel = {
+        id: me.id, text: me.text, clusterLabel: me.clusterLabel, color: me.color,
+        colorSoft: this._hexA(me.color, 0.1), colorBorder: this._hexA(me.color, 0.28),
+        source: me.source, dim: me.dim, access: me.access.toLocaleString("en-US"),
+        created: this._timeAgo(me.createdAt),
+        nearest: ns.length ? ns[0].dist.toFixed(3) : "—",
+        tags: me.tags, neighbors: mkNeighbors(ns),
+        onForget: () => this.forget(me.id), onPromote: () => this.promote(me.id), onRecall: () => this.recallFrom(me.id),
+      };
+    } else if (st.selected && st.selected.kind === "query") {
+      selQ = { text: st.selected.text, neighbors: mkNeighbors(st.selected.neighbors || []) };
+    }
+
+    // journal items with type-in on newest
+    const journalItems = st.journal.map((ev, i) => {
+      const newest = i === st.journal.length - 1;
+      const len = Math.min(ev.text.length, 78);
+      const dur = Math.max(0.32, len * 0.014);
+      const tagStyle = "color:" + ev.typeColor + ";flex:none;width:58px;font-weight:700;text-transform:uppercase;font-size:9.5px;letter-spacing:.04em";
+      const msgStyle = newest
+        ? { display: "inline-block", overflow: "hidden", whiteSpace: "nowrap", color: "#aebbd4", width: len + "ch", animation: "mxtype " + dur + "s steps(" + len + ") forwards, mxblink .85s step-end infinite", borderRight: "2px solid " + ev.typeColor, paddingRight: "2px" }
+        : { color: "#9aa8c4", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+      return { time: ev.time, type: ev.type, tagStyle, msgStyle, text: ev.text };
+    });
+
+    // comms
+    let commsColumns = [];
+    if (st.comms) {
+      commsColumns = st.comms.columns.map((col) => ({
+        label: col.label, color: col.color, count: col.cards.length,
+        cards: col.cards.map((c) => ({
+          author: c.author, type: c.type, target: c.target, text: c.text, mins: c.mins, promotable: c.promotable,
+          wrapStyle: "padding:11px 12px;border-radius:11px;background:rgba(13,18,32,.6);border:1px solid rgba(120,180,255,.08);" + (c.reply ? "margin-left:14px;border-left:2px solid " + col.color + "55" : ""),
+          typeStyle: "padding:2px 8px;border-radius:6px;font:700 9px 'JetBrains Mono';letter-spacing:.04em;text-transform:uppercase;color:" + c.typeColor + ";background:" + this._hexA(c.typeColor, 0.12),
+          onPromote: () => this.promote(c.id),
+        })),
+      }));
+    }
+
+    return {
+      canvasRef: this.canvasRef, layerRef: this.layerRef, hoverChipRef: this.hoverChipRef,
+      journalRef: this.journalRef, recallInputRef: this.recallInputRef,
+      notReady: !st.ready,
+      isGalaxy: st.view === "galaxy", isComms: st.view === "comms",
+      setGalaxy: () => this.setState({ view: "galaxy" }),
+      setComms: () => this.setState({ view: "comms" }),
+      galaxyTabStyle: tab(st.view === "galaxy"), commsTabStyle: tab(st.view === "comms"),
+      tenantList, currentTenantName: tenantName(st.tenant),
+      splitB: st.splitB, splitBName: tenantName(st.splitB), splitLabel, splitBtnStyle,
+      onSplitClick: () => this.onSplitClick(),
+      metrics: {
+        recallStr: m.recall.toFixed(3),
+        recallPct: Math.round(m.recall * 100),
+        recallDash: (125.66 * (1 - m.recall)).toFixed(1),
+        latencyStr: m.latency.toFixed(2),
+        memoriesStr: Math.round(m.memories).toLocaleString("en-US"),
+        clients: Math.round(m.clients),
+      },
+      keys, teamsOnly: st.teamsOnly, toggleTeams: () => this.toggleTeams(),
+      teamsSwitchStyle: "position:relative;width:38px;height:21px;border-radius:999px;border:none;cursor:pointer;transition:background .2s;background:" + (st.teamsOnly ? "rgba(53,230,255,.85)" : "rgba(120,140,170,.3)"),
+      teamsKnobStyle: "position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#fff;transition:transform .2s;transform:translateX(" + (st.teamsOnly ? "17px" : "0") + ")",
+      onRecallKey: (e) => this.onRecallKey(e), doRecall: () => this.doRecall(),
+      isEmpty: !st.selected, isMemory: !!sel, isQuery: !!selQ, hasAnySel: !!st.selected,
+      clearSel: () => this.clearSel(),
+      sel: sel || {}, selQ: selQ || {},
+      journalItems,
+      commsColumns, agentCount: st.comms ? st.comms.agents.length : 0,
+    };
+  }
+
+  _hexA(hex, a) {
+    const h = hex.replace("#", "");
+    const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+    return "rgba(" + r + "," + g + "," + b + "," + a + ")";
+  }
+}
+</script>
+</body>
+</html>
