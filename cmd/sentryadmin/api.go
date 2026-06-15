@@ -83,9 +83,12 @@ func (a *apiServer) handleGalaxy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleComms returns empty live comms for now (real wiring is a follow-up).
+// The shape MUST match the mock's comms() return ({columns, agents}) so the
+// dashboard's render (st.comms.columns.map / st.comms.agents.length) doesn't
+// crash; empty arrays render an empty kanban honestly.
 func (a *apiServer) handleComms(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"areas":[],"messages":[]}`))
+	w.Write([]byte(`{"columns":[],"agents":[]}`))
 }
 
 type galaxyPoint struct {
@@ -112,10 +115,14 @@ type galaxyCluster struct {
 	Count  int        `json:"count"`
 }
 type tenantInfo struct {
-	Key    string `json:"key"`
-	Name   string `json:"name"`
-	Glyph  string `json:"glyph"`
-	Accent string `json:"accent"`
+	Key    string   `json:"key"`
+	Name   string   `json:"name"`
+	Glyph  string   `json:"glyph"`
+	Accent string   `json:"accent"`
+	// Agents must be non-empty: the dashboard's simulated journal indexes
+	// tenant.agents at random, so an empty/absent list crashes it. We surface
+	// the corpus's distinct sources as stand-in agent labels.
+	Agents []string `json:"agents"`
 }
 
 type galaxyData struct {
@@ -196,7 +203,28 @@ func buildGalaxy(tenantKey string, cr *corpusResp) galaxyData {
 	}
 	sort.SliceStable(clusters, func(i, j int) bool { return clusters[i].Key < clusters[j].Key })
 	return galaxyData{
-		Tenant:   tenantInfo{Key: tm.Key, Name: tm.Name, Glyph: tm.Glyph, Accent: tm.Accent},
+		Tenant:   tenantInfo{Key: tm.Key, Name: tm.Name, Glyph: tm.Glyph, Accent: tm.Accent, Agents: deriveAgents(cr)},
 		Clusters: clusters, Points: pts,
 	}
+}
+
+// deriveAgents surfaces the corpus's distinct sources as stand-in agent labels
+// for the simulated journal (which indexes tenant.agents). Always returns a
+// non-empty slice — a default when no sources are tagged.
+func deriveAgents(cr *corpusResp) []string {
+	seen := map[string]bool{}
+	var agents []string
+	for _, m := range cr.Memories {
+		if m.Src != "" && !seen[m.Src] {
+			seen[m.Src] = true
+			agents = append(agents, "agent-"+m.Src)
+			if len(agents) >= 6 {
+				break
+			}
+		}
+	}
+	if len(agents) == 0 {
+		return []string{"agent-self", "agent-recall"}
+	}
+	return agents
 }

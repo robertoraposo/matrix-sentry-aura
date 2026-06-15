@@ -29,7 +29,7 @@
       if (mockComms) {
         C.comms = (tenantKey) => {
           const live = commsCache[tenantKey];
-          if (live && Array.isArray(live.messages)) return live;
+          if (live && Array.isArray(live.columns)) return live; // shape match ({columns,agents})
           return mockComms(tenantKey);
         };
       }
