@@ -437,12 +437,28 @@ personal server is byte-for-byte UNCHANGED. Spec/plan `docs/superpowers/{specs,p
   Mistral API. systemd `sentrymcp-mt` (`Restart=always`), env `/root/sentrymcp-mt.env` (chmod 600).
 - **tenants**: BlazeSphere=2, Kuadre=3, Round PlayGames=4. `tokens.json` secrets generated ON server2
   (`openssl rand -hex 16`, chmod 600); retrieve for out-of-band delivery with `ssh matrix-sentry2 'cat /root/sentry-tokens.json'`.
-- **VERIFIED on server2**: no-token → 401; team bearer → 9 tools; OAuth discovery issuer `https://matrix.blaze.net.do`.
-- **PENDING (owner)**: (1) set the real `SENTRY_MISTRAL_API_KEY` in `/root/sentrymcp-mt.env` (placeholder now;
-  `remember`/`recall` error until set), then `systemctl restart sentrymcp-mt`; (2) Cloudflare tunnel
-  `matrix.blaze.net.do` → `http://localhost:8809` (serves `/mcp` + OAuth `/.well-known/*`,`/authorize`,`/token`,
-  `/register`) + disable Bot Fight Mode; (3) isolation smoke (remember as BlazeSphere → recall as Kuadre must
-  NOT see it) once the key is set.
+- **PUBLIC ENDPOINT = `https://matrix.blazesphere.net/mcp`** (NOT matrix.blaze.net.do — see DNS note). OAuth
+  issuer set to `https://matrix.blazesphere.net` (must match the public host); `SENTRY_OAUTH_ISSUER` updated +
+  sentrymcp-mt restarted.
+- **Cloudflare route LIVE (extended the server1 tunnel, owner-chosen)**: server1's existing tunnel
+  `bf3a00c0-…` got a 2nd ingress rule `matrix.blazesphere.net → http://<server2-LAN>:8809` (before the 404
+  catch-all) + DNS CNAME `matrix.blazesphere.net`. cloudflared on server1 carries the team traffic over the
+  LAN to server2:8809. config backed up to `/etc/cloudflared/config.yml.bak-*`.
+- **DNS gotcha**: `matrix.blaze.net.do` could NOT be used — the tunnel's origin `cert.pem` is scoped to the
+  `blazesphere.net` zone, so `cloudflared tunnel route dns … matrix.blaze.net.do` mis-created
+  `matrix.blaze.net.do.blazesphere.net` (a proxied CNAME). `blaze.net.do` IS on Cloudflare but in a different
+  account/zone this cert can't manage. **LEFTOVER TO DELETE in the blazesphere.net DNS dashboard:
+  `matrix.blaze.net.do.blazesphere.net`** (no API token on the box → can't delete via CLI; harmless but messy).
+  To ever use a blaze.net.do host: add that zone to this CF account (or issue a cert/API token for it), then route.
+- **VERIFIED end-to-end**: no-token → 401 (local + public); team bearer → 9 tools BOTH on `localhost:8809` and
+  via the PUBLIC `https://matrix.blazesphere.net/mcp` (full path internet→CF→tunnel→server1→server2); OAuth
+  discovery issuer `https://matrix.blazesphere.net`.
+- **STILL PENDING (owner)**: (1) set the real `SENTRY_MISTRAL_API_KEY` in `/root/sentrymcp-mt.env` (placeholder
+  now; `remember`/`recall` error until set), then `systemctl restart sentrymcp-mt`; (2) disable Bot Fight Mode
+  for blazesphere.net (same gotcha as 8808); (3) delete the leftover `matrix.blaze.net.do.blazesphere.net`
+  record; (4) isolation smoke (remember as BlazeSphere → recall as Kuadre must NOT see it) once the key is set;
+  (5) add the connector in claude.ai (custom connector URL `https://matrix.blazesphere.net/mcp` → consent with
+  each team's secret as the passphrase → that team's tenant).
 - **Review nits noted (non-blocking)**: dim-bump fires on literal 768 (fine for mistral-embed=1024; a custom
   768-dim Mistral model couldn't override); OAuth-enabled + empty registry would 401 all consent (N/A here —
   registry has 3 teams).
