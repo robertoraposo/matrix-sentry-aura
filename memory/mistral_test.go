@@ -86,3 +86,16 @@ func TestMistralDim(t *testing.T) {
 		t.Fatal("Dim mismatch")
 	}
 }
+
+func TestMistralEmbedDuplicateIndex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Two items, both index 0 → vecs[1] is never filled.
+		io.WriteString(w, `{"data":[{"index":0,"embedding":[1,2,3]},{"index":0,"embedding":[4,5,6]}]}`)
+	}))
+	defer srv.Close()
+	e := NewMistralEmbedder("k", "mistral-embed", 3)
+	e.url = srv.URL
+	if _, err := e.Embed([]string{"a", "b"}); err == nil {
+		t.Fatal("expected error: duplicate index leaves a missing embedding")
+	}
+}
