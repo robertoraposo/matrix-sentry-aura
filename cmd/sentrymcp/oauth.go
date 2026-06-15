@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"matrixsentry/sentry"
 )
 
 const (
@@ -38,22 +40,25 @@ type authCode struct {
 	codeChallenge string // PKCE S256 challenge
 	scope         string
 	expiry        time.Time
+	tenant        sentry.TenantID
 }
 
 type oauthProvider struct {
 	issuer        string // public base URL, e.g. https://mcp.blazesphere.net
-	approveSecret string // passphrase the owner enters to consent
+	approveSecret string // passphrase the owner enters to consent (kept for JWT signing key derivation)
 	signKey       []byte // HMAC key derived from approveSecret
+	tenantFor     func(secret string) (sentry.TenantID, bool) // consent passphrase → tenant
 	mu            sync.Mutex
 	codes         map[string]authCode
 }
 
-func newOAuth(issuer, approveSecret string) *oauthProvider {
+func newOAuth(issuer, approveSecret string, tenantFor func(string) (sentry.TenantID, bool)) *oauthProvider {
 	k := sha256.Sum256([]byte("matrix-sentry-oauth-v1|" + approveSecret))
 	return &oauthProvider{
 		issuer:        strings.TrimRight(issuer, "/"),
 		approveSecret: approveSecret,
 		signKey:       k[:],
+		tenantFor:     tenantFor,
 		codes:         map[string]authCode{},
 	}
 }
@@ -97,17 +102,18 @@ func verifyPKCE(verifier, challenge string) bool {
 }
 
 type jwtClaims struct {
-	Sub  string `json:"sub"`
-	Iss  string `json:"iss"`
-	Kind string `json:"kind"` // "access" | "refresh"
-	Iat  int64  `json:"iat"`
-	Exp  int64  `json:"exp"`
+	Sub  string          `json:"sub"`
+	Iss  string          `json:"iss"`
+	Kind string          `json:"kind"` // "access" | "refresh"
+	Iat  int64           `json:"iat"`
+	Exp  int64           `json:"exp"`
+	Tnt  sentry.TenantID `json:"tnt,omitempty"`
 }
 
-func (o *oauthProvider) signToken(subject, kind string, ttl time.Duration) string {
+func (o *oauthProvider) signToken(subject, kind string, ttl time.Duration, tenant sentry.TenantID) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	now := time.Now()
-	cl := jwtClaims{Sub: subject, Iss: o.issuer, Kind: kind, Iat: now.Unix(), Exp: now.Add(ttl).Unix()}
+	cl := jwtClaims{Sub: subject, Iss: o.issuer, Kind: kind, Iat: now.Unix(), Exp: now.Add(ttl).Unix(), Tnt: tenant}
 	cb, _ := json.Marshal(cl)
 	payload := base64.RawURLEncoding.EncodeToString(cb)
 	signing := header + "." + payload
@@ -117,30 +123,30 @@ func (o *oauthProvider) signToken(subject, kind string, ttl time.Duration) strin
 	return signing + "." + sig
 }
 
-func (o *oauthProvider) verifyToken(tok, kind string) (string, bool) {
+func (o *oauthProvider) verifyToken(tok, kind string) (jwtClaims, bool) {
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {
-		return "", false
+		return jwtClaims{}, false
 	}
 	signing := parts[0] + "." + parts[1]
 	mac := hmac.New(sha256.New, o.signKey)
 	mac.Write([]byte(signing))
 	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	if subtle.ConstantTimeCompare([]byte(want), []byte(parts[2])) != 1 {
-		return "", false
+		return jwtClaims{}, false
 	}
 	cb, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", false
+		return jwtClaims{}, false
 	}
 	var cl jwtClaims
 	if err := json.Unmarshal(cb, &cl); err != nil {
-		return "", false
+		return jwtClaims{}, false
 	}
 	if cl.Kind != kind || cl.Iss != o.issuer || time.Now().Unix() >= cl.Exp {
-		return "", false
+		return jwtClaims{}, false
 	}
-	return cl.Sub, true
+	return cl, true
 }
 
 // --- authorization codes (in-memory, short-lived, single-use) ---
@@ -315,7 +321,8 @@ func (o *oauthProvider) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid_request: PKCE S256 required", http.StatusBadRequest)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(get("passphrase")), []byte(o.approveSecret)) != 1 {
+	tnt, ok := o.tenantFor(get("passphrase"))
+	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<p>Incorrect passphrase. <a href="javascript:history.back()">Try again</a>.</p>`)
@@ -323,7 +330,7 @@ func (o *oauthProvider) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 	}
 	code := o.issueCode(authCode{
 		clientID: get("client_id"), redirectURI: redirectURI,
-		codeChallenge: challenge, scope: get("scope"),
+		codeChallenge: challenge, scope: get("scope"), tenant: tnt,
 	})
 	// Build the redirect with proper URL encoding, preserving any existing query.
 	u, err := url.Parse(redirectURI)
@@ -367,23 +374,23 @@ func (o *oauthProvider) handleToken(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "PKCE verification failed"})
 			return
 		}
-		o.emitTokens(w, "owner")
+		o.emitTokens(w, "owner", c.tenant)
 	case "refresh_token":
-		sub, ok := o.verifyToken(r.Form.Get("refresh_token"), "refresh")
+		cl, ok := o.verifyToken(r.Form.Get("refresh_token"), "refresh")
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 			return
 		}
-		o.emitTokens(w, sub)
+		o.emitTokens(w, cl.Sub, cl.Tnt)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported_grant_type"})
 	}
 }
 
-func (o *oauthProvider) emitTokens(w http.ResponseWriter, subject string) {
+func (o *oauthProvider) emitTokens(w http.ResponseWriter, subject string, tenant sentry.TenantID) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token":  o.signToken(subject, "access", accessTokenTTL),
-		"refresh_token": o.signToken(subject, "refresh", refreshTokenTTL),
+		"access_token":  o.signToken(subject, "access", accessTokenTTL, tenant),
+		"refresh_token": o.signToken(subject, "refresh", refreshTokenTTL, tenant),
 		"token_type":    "Bearer",
 		"expires_in":    int(accessTokenTTL.Seconds()),
 		"scope":         "mcp",

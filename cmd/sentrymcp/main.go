@@ -63,7 +63,8 @@ type server struct {
 	oauth  *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
 	moko   *mokoblinks.Client
 	tenant sentry.TenantID
-	token  string // optional bearer auth for HTTP transport
+	token  string          // optional bearer auth for HTTP transport
+	tokens *tokenRegistry  // secret→tenant; owner built-in, teams from SENTRY_TOKENS_FILE
 }
 
 func main() {
@@ -93,6 +94,17 @@ func main() {
 	moko := mokoblinks.FromEnv()
 	s := &server{store: store, reg: reg, moko: moko, tenant: sentry.TenantID(*tenant)}
 
+	// Build the token registry from SENTRY_TOKENS_FILE (opt-in multi-tenant).
+	// With no file, only the owner entry exists → identical to single-tenant today.
+	// Note: s.token is set later in serveHTTP, but SENTRY_MCP_TOKEN is stable here.
+	ownerSecret := os.Getenv("SENTRY_MCP_TOKEN")
+	var tokensErr error
+	s.tokens, tokensErr = loadTokenRegistry(envOr("SENTRY_TOKENS_FILE", ""), ownerSecret, s.tenant)
+	if tokensErr != nil {
+		fmt.Fprintf(os.Stderr, "sentrymcp: %v\n", tokensErr)
+		os.Exit(1)
+	}
+
 	// Semantic memory is enabled only when an embedder is configured. Without
 	// -ollama the journal/telemetry tools still work; remember/recall report
 	// that embeddings are not configured rather than failing opaquely.
@@ -117,7 +129,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "sentrymcp: -oauth-issuer requires SENTRY_MCP_TOKEN (used as the consent passphrase + signing key)")
 			os.Exit(1)
 		}
-		s.oauth = newOAuth(*oauthIssuer, secret)
+		s.oauth = newOAuth(*oauthIssuer, secret, s.tokens.Tenant)
 		moko.Info("native OAuth enabled", map[string]string{"issuer": *oauthIssuer})
 	}
 
@@ -141,7 +153,7 @@ func (s *server) serveStdio() {
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
-			if resp, ok := s.dispatch(line); ok {
+			if resp, ok := s.dispatch(line, s.tenant); ok {
 				b, _ := json.Marshal(resp)
 				out.Write(b)
 				out.WriteByte('\n')
@@ -175,20 +187,29 @@ func (s *server) serveHTTP(addr string) {
 	}
 }
 
-// authorized reports whether the request carries a valid credential: the static
-// bearer token (Claude Code) OR a valid OAuth access token (claude.ai). When no
-// auth is configured at all, requests are allowed (local/dev).
-func (s *server) authorized(r *http.Request) bool {
+// resolveTenant maps an HTTP request to its tenant via the credential: a static
+// bearer secret in the registry, or an OAuth access token's tnt claim. Returns
+// (_, false) → 401. Open/local mode (no static token and no OAuth) → default.
+func (s *server) resolveTenant(r *http.Request) (sentry.TenantID, bool) {
 	auth := r.Header.Get("Authorization")
-	if s.token != "" && auth == "Bearer "+s.token {
-		return true
-	}
-	if s.oauth != nil && strings.HasPrefix(auth, "Bearer ") {
-		if _, ok := s.oauth.verifyToken(strings.TrimPrefix(auth, "Bearer "), "access"); ok {
-			return true
+	if strings.HasPrefix(auth, "Bearer ") {
+		secret := strings.TrimPrefix(auth, "Bearer ")
+		if t, ok := s.tokens.Tenant(secret); ok {
+			return t, true
+		}
+		if s.oauth != nil {
+			if cl, ok := s.oauth.verifyToken(secret, "access"); ok {
+				if cl.Tnt != 0 {
+					return cl.Tnt, true
+				}
+				return s.tenant, true // tnt-less (legacy) token → default tenant
+			}
 		}
 	}
-	return s.token == "" && s.oauth == nil
+	if s.token == "" && s.oauth == nil {
+		return s.tenant, true // open/local mode (unchanged)
+	}
+	return 0, false
 }
 
 func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {
@@ -209,7 +230,8 @@ func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "use POST /mcp", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.authorized(r) {
+	tenant, ok := s.resolveTenant(r)
+	if !ok {
 		if s.oauth != nil {
 			w.Header().Set("WWW-Authenticate", s.oauth.wwwAuthenticate())
 		}
@@ -221,7 +243,7 @@ func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
 	}
-	resp, ok := s.dispatch(body)
+	resp, ok := s.dispatch(body, tenant)
 	if !ok {
 		w.WriteHeader(http.StatusAccepted) // notification: no response body
 		return
@@ -245,7 +267,7 @@ func mInit(body []byte) bool {
 
 // dispatch parses one JSON-RPC message and returns the response (ok=false for
 // notifications, which get no response).
-func (s *server) dispatch(line []byte) (rpcResp, bool) {
+func (s *server) dispatch(line []byte, tenant sentry.TenantID) (rpcResp, bool) {
 	var req rpcReq
 	if err := json.Unmarshal(line, &req); err != nil {
 		return rpcResp{}, false
@@ -266,7 +288,7 @@ func (s *server) dispatch(line []byte) (rpcResp, bool) {
 	case "tools/list":
 		return s.ok(req.ID, map[string]any{"tools": toolList()}), true
 	case "tools/call":
-		return s.callTool(req), true
+		return s.callTool(req, tenant), true
 	default:
 		if notification {
 			return rpcResp{}, false
@@ -341,7 +363,7 @@ func toolList() []map[string]any {
 	}
 }
 
-func (s *server) callTool(req rpcReq) rpcResp {
+func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 	var p struct {
 		Name string         `json:"name"`
 		Args map[string]any `json:"arguments"`
@@ -357,7 +379,7 @@ func (s *server) callTool(req rpcReq) rpcResp {
 			s.mu.Lock()
 			var ids []uint64
 			for _, path := range paths {
-				id, _, err := s.reg.Record(s.tenant, path, src)
+				id, _, err := s.reg.Record(tenant, path, src)
 				if err != nil {
 					s.mu.Unlock()
 					return s.toolErr(req.ID, "append failed: "+err.Error())
@@ -366,7 +388,7 @@ func (s *server) callTool(req rpcReq) rpcResp {
 			}
 			s.mu.Unlock()
 			s.moko.Info("record_access", map[string]string{
-				"tenant": fmt.Sprint(s.tenant), "src": src,
+				"tenant": fmt.Sprint(tenant), "src": src,
 				"paths": fmt.Sprint(len(paths)), "items": fmt.Sprint(ids),
 			})
 			return s.toolText(req.ID, fmt.Sprintf("recorded %d access(es) src=%q items=%v", len(paths), src, ids))
@@ -376,26 +398,26 @@ func (s *server) callTool(req rpcReq) rpcResp {
 			return s.toolErr(req.ID, "provide one of 'item', 'path', or 'paths'")
 		}
 		s.mu.Lock()
-		seq, err := s.store.Append(s.tenant, sentry.EventAccess, sentry.AccessPayload{ItemID: uint64(item), Source: src})
+		seq, err := s.store.Append(tenant, sentry.EventAccess, sentry.AccessPayload{ItemID: uint64(item), Source: src})
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "append failed: "+err.Error())
 		}
-		s.moko.Info("record_access", map[string]string{"tenant": fmt.Sprint(s.tenant), "item": fmt.Sprint(uint64(item)), "seq": fmt.Sprint(seq)})
+		s.moko.Info("record_access", map[string]string{"tenant": fmt.Sprint(tenant), "item": fmt.Sprint(uint64(item)), "seq": fmt.Sprint(seq)})
 		return s.toolText(req.ID, fmt.Sprintf("recorded access item=%d as seq=%d", uint64(item), seq))
 	case "analyze_access":
-		rep, err := access.Analyze(s.store, s.tenant)
+		rep, err := access.Analyze(s.store, tenant)
 		if err != nil {
 			return s.toolErr(req.ID, "analyze failed: "+err.Error())
 		}
 		s.moko.Info("analyze_access", map[string]string{
-			"tenant": fmt.Sprint(s.tenant), "total": fmt.Sprint(rep.Total),
+			"tenant": fmt.Sprint(tenant), "total": fmt.Sprint(rep.Total),
 			"lift": fmt.Sprintf("%.4f", rep.Lift), "markov": fmt.Sprintf("%.4f", rep.MarkovHit),
 			"marginal": fmt.Sprintf("%.4f", rep.MarginalHit), "coverage": fmt.Sprintf("%.4f", rep.Coverage),
 		})
 		return s.toolText(req.ID, fmt.Sprintf(
 			"access analysis (tenant %d): total=%d  markovHit=%.1f%%  marginalHit=%.1f%%  LIFT=%.1f%%  coverage=%.1f%%\n%s",
-			s.tenant, rep.Total, rep.MarkovHit*100, rep.MarginalHit*100, rep.Lift*100, rep.Coverage*100, liftVerdict(rep.Lift)))
+			tenant, rep.Total, rep.MarkovHit*100, rep.MarginalHit*100, rep.Lift*100, rep.Coverage*100, liftVerdict(rep.Lift)))
 	case "remember":
 		if s.mem == nil {
 			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
@@ -409,12 +431,12 @@ func (s *server) callTool(req rpcReq) rpcResp {
 		supersedes := uintArg(p.Args, "supersedes")
 		force := boolArg(p.Args, "force")
 		s.mu.Lock()
-		id, deduped, superseded, err := s.mem.Remember(s.tenant, text, memory.RememberOpts{Tags: tags, Src: src, Supersedes: supersedes, Force: force})
+		id, deduped, superseded, err := s.mem.Remember(tenant, text, memory.RememberOpts{Tags: tags, Src: src, Supersedes: supersedes, Force: force})
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "remember failed: "+err.Error())
 		}
-		s.moko.Info("remember", map[string]string{"tenant": fmt.Sprint(s.tenant), "id": fmt.Sprint(id), "tags": fmt.Sprint(tags), "len": fmt.Sprint(len(text)), "deduped": fmt.Sprint(deduped), "superseded": fmt.Sprint(superseded)})
+		s.moko.Info("remember", map[string]string{"tenant": fmt.Sprint(tenant), "id": fmt.Sprint(id), "tags": fmt.Sprint(tags), "len": fmt.Sprint(len(text)), "deduped": fmt.Sprint(deduped), "superseded": fmt.Sprint(superseded)})
 		switch {
 		case superseded != 0:
 			return s.toolText(req.ID, fmt.Sprintf("remembered as memory #%d, superseding #%d", id, superseded))
@@ -437,11 +459,11 @@ func (s *server) callTool(req rpcReq) rpcResp {
 		if v, ok := numArg(p.Args, "k"); ok && int(v) > 0 {
 			k = int(v)
 		}
-		hits, err := s.mem.Recall(s.tenant, query, k)
+		hits, err := s.mem.Recall(tenant, query, k)
 		if err != nil {
 			return s.toolErr(req.ID, "recall failed: "+err.Error())
 		}
-		s.moko.Info("recall", map[string]string{"tenant": fmt.Sprint(s.tenant), "k": fmt.Sprint(k), "hits": fmt.Sprint(len(hits))})
+		s.moko.Info("recall", map[string]string{"tenant": fmt.Sprint(tenant), "k": fmt.Sprint(k), "hits": fmt.Sprint(len(hits))})
 		return s.toolText(req.ID, formatRecall(query, hits))
 	case "forget":
 		if s.mem == nil {
@@ -452,12 +474,12 @@ func (s *server) callTool(req rpcReq) rpcResp {
 			return s.toolErr(req.ID, "provide an 'id' to forget")
 		}
 		s.mu.Lock()
-		forgotten, err := s.mem.Forget(s.tenant, id)
+		forgotten, err := s.mem.Forget(tenant, id)
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "forget failed: "+err.Error())
 		}
-		s.moko.Info("forget", map[string]string{"tenant": fmt.Sprint(s.tenant), "id": fmt.Sprint(id), "forgotten": fmt.Sprint(forgotten)})
+		s.moko.Info("forget", map[string]string{"tenant": fmt.Sprint(tenant), "id": fmt.Sprint(id), "forgotten": fmt.Sprint(forgotten)})
 		if forgotten {
 			return s.toolText(req.ID, fmt.Sprintf("forgot memory #%d (removed from recall; still in the journal history)", id))
 		}

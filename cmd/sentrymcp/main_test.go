@@ -27,13 +27,18 @@ func newTestServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &server{store: store, reg: reg, moko: mokoblinks.FromEnv(), tenant: 1}
+	// No owner secret in tests → registry with no entries (open/local mode).
+	tokens, err := loadTokenRegistry("", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &server{store: store, reg: reg, moko: mokoblinks.FromEnv(), tenant: 1, tokens: tokens}
 }
 
 func callRecord(t *testing.T, s *server, args map[string]any) rpcResp {
 	t.Helper()
 	params, _ := json.Marshal(map[string]any{"name": "record_access", "arguments": args})
-	return s.callTool(rpcReq{ID: json.RawMessage("1"), Params: params})
+	return s.callTool(rpcReq{ID: json.RawMessage("1"), Params: params}, s.tenant)
 }
 
 func respText(t *testing.T, r rpcResp) string {
@@ -174,7 +179,7 @@ func newMemServer(t *testing.T) *server {
 
 func callNamed(s *server, name string, args map[string]any) rpcResp {
 	params, _ := json.Marshal(map[string]any{"name": name, "arguments": args})
-	return s.callTool(rpcReq{ID: json.RawMessage("1"), Params: params})
+	return s.callTool(rpcReq{ID: json.RawMessage("1"), Params: params}, s.tenant)
 }
 
 func TestRememberThenRecall(t *testing.T) {
@@ -258,6 +263,37 @@ func TestForgetToolValidation(t *testing.T) {
 	content2 := m2["content"].([]map[string]any)[0]["text"].(string)
 	if !strings.Contains(content2, "id") {
 		t.Fatalf("forget missing-id error should mention 'id', got %q", content2)
+	}
+}
+
+func TestCallToolTenantIsolation(t *testing.T) {
+	s := newMemServer(t) // *server with mem + a default tenant (1)
+	// remember under tenant 2 via callTool's tenant param
+	rememberReq := func(text string) rpcReq {
+		args, _ := json.Marshal(map[string]any{"name": "remember", "arguments": map[string]any{"text": text}})
+		return rpcReq{ID: json.RawMessage("1"), Method: "tools/call", Params: args}
+	}
+	recallReq := func(q string) rpcReq {
+		args, _ := json.Marshal(map[string]any{"name": "recall", "arguments": map[string]any{"query": q, "k": 5}})
+		return rpcReq{ID: json.RawMessage("1"), Method: "tools/call", Params: args}
+	}
+	textOf := func(r rpcResp) string {
+		b, _ := json.Marshal(r.Result)
+		return string(b)
+	}
+
+	s.callTool(rememberReq("ACME-only secret roadmap fact"), 2)
+	s.callTool(rememberReq("owner-only personal note"), 1)
+
+	// tenant 2 recall sees ACME, not owner's
+	got2 := textOf(s.callTool(recallReq("roadmap fact"), 2))
+	if !strings.Contains(got2, "ACME-only") || strings.Contains(got2, "owner-only") {
+		t.Fatalf("tenant 2 recall leaked/missing: %s", got2)
+	}
+	// tenant 1 recall sees owner's, not ACME
+	got1 := textOf(s.callTool(recallReq("roadmap fact"), 1))
+	if !strings.Contains(got1, "owner-only") || strings.Contains(got1, "ACME-only") {
+		t.Fatalf("tenant 1 recall leaked/missing: %s", got1)
 	}
 }
 

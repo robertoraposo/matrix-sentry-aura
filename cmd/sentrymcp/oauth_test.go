@@ -11,12 +11,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"matrixsentry/sentry"
 )
 
 const testIssuer = "https://mcp.example.com"
 const testSecret = "owner-passphrase-123"
 
-func newTestOAuth() *oauthProvider { return newOAuth(testIssuer, testSecret) }
+func newTestOAuth() *oauthProvider {
+	return newOAuth(testIssuer, testSecret, func(s string) (sentry.TenantID, bool) {
+		if s == testSecret {
+			return 1, true
+		}
+		return 0, false
+	})
+}
 
 func TestPKCEVerifyS256(t *testing.T) {
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
@@ -32,9 +41,9 @@ func TestPKCEVerifyS256(t *testing.T) {
 
 func TestJWTRoundTripTamperExpiry(t *testing.T) {
 	o := newTestOAuth()
-	tok := o.signToken("user", "access", time.Hour)
-	if sub, ok := o.verifyToken(tok, "access"); !ok || sub != "user" {
-		t.Fatalf("valid token rejected: sub=%q ok=%v", sub, ok)
+	tok := o.signToken("user", "access", time.Hour, 0)
+	if cl, ok := o.verifyToken(tok, "access"); !ok || cl.Sub != "user" {
+		t.Fatalf("valid token rejected: sub=%q ok=%v", cl.Sub, ok)
 	}
 	if _, ok := o.verifyToken(tok, "refresh"); ok {
 		t.Fatal("access token accepted as refresh kind")
@@ -42,12 +51,12 @@ func TestJWTRoundTripTamperExpiry(t *testing.T) {
 	if _, ok := o.verifyToken(tok+"x", "access"); ok {
 		t.Fatal("tampered token accepted")
 	}
-	expired := o.signToken("user", "access", -time.Minute)
+	expired := o.signToken("user", "access", -time.Minute, 0)
 	if _, ok := o.verifyToken(expired, "access"); ok {
 		t.Fatal("expired token accepted")
 	}
 	// a different provider (different key) must reject our token
-	other := newOAuth(testIssuer, "different-secret")
+	other := newOAuth(testIssuer, "different-secret", func(string) (sentry.TenantID, bool) { return 0, false })
 	if _, ok := other.verifyToken(tok, "access"); ok {
 		t.Fatal("token verified under a different signing key")
 	}
@@ -252,7 +261,7 @@ func TestCORSPreflightAllowsClaude(t *testing.T) {
 
 func TestRefreshTokenGrant(t *testing.T) {
 	o := newTestOAuth()
-	rt := o.signToken("user", "refresh", time.Hour)
+	rt := o.signToken("user", "refresh", time.Hour, 0)
 	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {rt}}
 	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -273,7 +282,9 @@ var _ = io.Discard
 func TestMCPAuthAcceptsStaticAndOAuthAndChallenges(t *testing.T) {
 	s := newTestServer(t)
 	s.token = "static123"
-	s.oauth = newOAuth(testIssuer, "static123")
+	reg, _ := loadTokenRegistry("", "static123", 1)
+	s.tokens = reg
+	s.oauth = newOAuth(testIssuer, "static123", s.tokens.Tenant)
 
 	call := func(authz string) *httptest.ResponseRecorder {
 		body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
@@ -301,7 +312,7 @@ func TestMCPAuthAcceptsStaticAndOAuthAndChallenges(t *testing.T) {
 	}
 
 	// oauth access token (claude.ai) -> ok
-	at := s.oauth.signToken("owner", "access", time.Hour)
+	at := s.oauth.signToken("owner", "access", time.Hour, 1)
 	if rec := call("Bearer " + at); rec.Code != http.StatusOK {
 		t.Fatalf("oauth token status %d, want 200", rec.Code)
 	}
@@ -399,5 +410,32 @@ func TestRedirectEncodesStateAndCode(t *testing.T) {
 	}
 	if loc.Query().Get("state") != "a b&c=d" {
 		t.Fatalf("state not round-tripped through encoding: %q", loc.Query().Get("state"))
+	}
+}
+
+func TestSignVerifyCarriesTenant(t *testing.T) {
+	o := newOAuth("https://x.example", "owner-sec", func(string) (sentry.TenantID, bool) { return 0, false })
+	tok := o.signToken("owner", "access", time.Minute, sentry.TenantID(7))
+	cl, ok := o.verifyToken(tok, "access")
+	if !ok || cl.Sub != "owner" || cl.Tnt != 7 {
+		t.Fatalf("verify = %+v ok=%v, want Sub=owner Tnt=7", cl, ok)
+	}
+}
+
+func TestVerifyTenantlessTokenIsZero(t *testing.T) {
+	// A token signed with tenant 0 (legacy/owner) decodes Tnt==0; the caller maps 0→default.
+	o := newOAuth("https://x.example", "owner-sec", func(string) (sentry.TenantID, bool) { return 0, false })
+	tok := o.signToken("owner", "access", time.Minute, 0)
+	cl, ok := o.verifyToken(tok, "access")
+	if !ok || cl.Tnt != 0 {
+		t.Fatalf("legacy token Tnt = %d, want 0", cl.Tnt)
+	}
+}
+
+func TestVerifyRejectsWrongKind(t *testing.T) {
+	o := newOAuth("https://x.example", "owner-sec", func(string) (sentry.TenantID, bool) { return 0, false })
+	tok := o.signToken("owner", "refresh", time.Minute, 0)
+	if _, ok := o.verifyToken(tok, "access"); ok {
+		t.Fatal("refresh token must not verify as access")
 	}
 }
