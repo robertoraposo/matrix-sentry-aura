@@ -203,6 +203,7 @@ func (s *server) serveHTTP(addr string) {
 		mux.HandleFunc("/authorize", s.oauth.handleAuthorize)
 		mux.HandleFunc("/token", s.oauth.handleToken)
 	}
+	mux.HandleFunc("/admin/corpus", s.handleAdminCorpus)
 	mux.HandleFunc("/", s.handleHTTP)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "sentrymcp http: %v\n", err)
@@ -233,6 +234,41 @@ func (s *server) resolveTenant(r *http.Request) (sentry.TenantID, bool) {
 		return s.tenant, true // open/local mode — no auth configured at all
 	}
 	return 0, false
+}
+
+// handleAdminCorpus serves a tenant's full memory corpus (with vectors) for the
+// admin dashboard's galaxy view. Auth + tenant come from resolveTenant (same as
+// the MCP). Server-to-server only (the admin proxy calls it); no CORS.
+func (s *server) handleAdminCorpus(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := s.resolveTenant(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.mem == nil {
+		http.Error(w, "semantic memory disabled (no embedder)", http.StatusServiceUnavailable)
+		return
+	}
+	mems := s.mem.List(tenant)
+	type item struct {
+		ID   uint64    `json:"id"`
+		Text string    `json:"text"`
+		Tags []string  `json:"tags,omitempty"`
+		Src  string    `json:"src,omitempty"`
+		Vec  []float32 `json:"vec"`
+	}
+	out := struct {
+		Tenant   int    `json:"tenant"`
+		Dim      int    `json:"dim"`
+		Count    int    `json:"count"`
+		Memories []item `json:"memories"`
+	}{Tenant: int(tenant), Count: len(mems), Memories: make([]item, 0, len(mems))}
+	for _, m := range mems {
+		out.Dim = len(m.Vector)
+		out.Memories = append(out.Memories, item{ID: m.ID, Text: m.Text, Tags: m.Tags, Src: m.Source, Vec: m.Vector})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
 }
 
 func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {

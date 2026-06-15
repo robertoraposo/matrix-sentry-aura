@@ -387,6 +387,53 @@ func TestCommsPromote(t *testing.T) {
 	}
 }
 
+func TestAdminCorpusReturnsTenantMemories(t *testing.T) {
+	s := newMemServer(t)
+	s.mem.Remember(s.tenant, "deploy on fridays", memory.RememberOpts{Tags: []string{"deploy"}})
+	s.mem.Remember(s.tenant, "indentation style", memory.RememberOpts{})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/corpus", nil)
+	rec := httptest.NewRecorder()
+	s.handleAdminCorpus(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Tenant   int `json:"tenant"`
+		Count    int `json:"count"`
+		Memories []struct {
+			ID  uint64    `json:"id"`
+			Vec []float32 `json:"vec"`
+		} `json:"memories"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Count != 2 || len(out.Memories) != 2 {
+		t.Fatalf("want 2 memories, got %d", out.Count)
+	}
+	if len(out.Memories[0].Vec) == 0 {
+		t.Fatal("memories must include vectors")
+	}
+}
+
+func TestAdminCorpusRequiresAuthWhenConfigured(t *testing.T) {
+	s := newMemServer(t)
+	s.token = "owner-secret"
+	reg, err := loadTokenRegistry("", "owner-secret", s.tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.tokens = reg
+	req := httptest.NewRequest(http.MethodGet, "/admin/corpus", nil) // no Authorization
+	rec := httptest.NewRecorder()
+	s.handleAdminCorpus(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no bearer must be 401, got %d", rec.Code)
+	}
+}
+
 func TestCommsPostReadPromote(t *testing.T) {
 	s := newMemServer(t) // *server with mem + chat over a temp journal, default tenant 1
 	post := func(area, from, text string) rpcReq {
