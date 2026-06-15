@@ -397,6 +397,24 @@ the OAuth consent passphrase (claude.ai) → that team's tenant. The storage lay
   separate change to avoid risking the live connector); `stats` is journal-wide (leaks a cross-tenant event
   count — scope per-tenant if teams' activity is sensitive); OAuth `sub` hardcoded "owner" in logs (cosmetic).
 
+## ✅ AGENT COMMS CHANNEL — LIVE (2026-06-15)
+
+Real-time agent coordination v1 (spec/plan `docs/superpowers/{specs,plans}/2026-06-15-agent-comms-channel.*`):
+several agents on one project post questions/answers/info in a shared "area" and read each other in
+near-real-time. Built as a SEPARATE log from semantic memory (ordered, NO dedup, NO embedding).
+- **`comms/` pkg**: `EventMessage` (type 5) on the journal; `comms.Store` mirrors `memory.Store`
+  (in-RAM index rebuilt on New). `Post(tenant,MessagePayload{Area,From,Kind,Text,Target,Ref})→seq`,
+  `Read(tenant,area,since)`, `Get`. Message id = journal seq. Tenant-isolated.
+- **`cmd/sentrymcp` tools** (tenant-scoped via resolveTenant): `post(area,from,text,kind?,target?,ref?)`,
+  `read(area,since?,target?)` (cursor + @target filter, cap 100, returns `(cursor: #N)`), `promote(area,seq,tags?)`
+  → durable memory via Remember. All TDD (round-trip, since-cursor, area filter, tenant isolation, no-dedup,
+  survives-reopen, promote happy/not-found), `-race` clean, reviewed.
+- **Delivery v1 = PULL** (agents poll `read(area, since=cursor)`); the EventMessage log is the substrate for a
+  v2 SSE `subscribe` push (deferred, gated on "is poll latency a problem?") — zero data redesign.
+- **Deployed to 8808 + verified live**: post A/B (question @agent-A) → read-since-cursor → promote→memory →
+  cleaned. `tools/list` now serves post/read/promote (9 tools). **Clients must reconnect/new-session to SEE
+  the 3 new tools** (the MCP stale-tool-cache gotcha).
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
