@@ -361,6 +361,32 @@ margin features → `(nprobe, rerankK)` to Pareto-dominate the static `ivf.Recom
   gaps of the shortlist), computed mid-search → adaptive rerank depth. That is a separate spec; the GP engine
   + `SearchPolicy` plumbing are already in place to reuse.
 
+## ✅ MULTI-TENANT BY KEY — built, opt-in, 2nd-server deploy pending (2026-06-15)
+
+Per-team isolated corpora via a credential→tenant registry (spec/plan `docs/superpowers/{specs,plans}/
+2026-06-15-multitenant-by-key.*`). One secret per team works as BOTH a static bearer (Claude Code/agents) and
+the OAuth consent passphrase (claude.ai) → that team's tenant. The storage layer was already tenant-isolated
+(`memory.Recall/Remember/Forget` + journal filter by tenant); this only added request→tenant routing.
+- **`cmd/sentrymcp/tenants.go`**: `tokenRegistry` (`loadTokenRegistry(SENTRY_TOKENS_FILE, ownerSecret,
+  ownerTenant)` + `Tenant(secret)`). Owner secret (`SENTRY_MCP_TOKEN`) is the built-in entry → the `-tenant`
+  default (1). Teams come from `tokens.json` `[{secret,tenant,label}]`. Fail-fast: rejects tenant 0, owner-dup,
+  duplicate team secrets. Constant-time compare.
+- **`main.go`**: `authorized` → `resolveTenant(r)`; tenant threaded `dispatch(_,tenant)`→`callTool(_,tenant)`;
+  every handler uses the per-request tenant. **OPT-IN:** no `SENTRY_TOKENS_FILE` ⇒ registry is owner-only ⇒
+  behavior byte-identical to today (pinned by tests). stdio stays single-tenant (`-tenant`).
+- **`oauth.go`**: `jwtClaims.Tnt`; consent passphrase → tenant via `tenantFor`; access JWTs carry `tnt`;
+  legacy `tnt`-less tokens → default tenant.
+- **Security:** review caught + fixed an open-mode auth-bypass (tokens.json set without `SENTRY_MCP_TOKEN` no
+  longer falls into open mode — requires `len(registry)==0`). TDD incl. isolation + no-bypass + OAuth tnt
+  round-trip; all green, `-race` clean.
+- **Deploy = SECOND instance** (own port/journal/`tokens.json`); the live 8808 personal server is **untouched**
+  (standalone, your tenant-1 corpus intact). NOT YET deployed — pending the owner's go (or until a real team
+  exists). A teams-only 2nd server can run with ONLY `tokens.json` (no owner token, no oauth) — the bypass fix
+  makes that require a valid team bearer.
+- **Deferred follow-ups (from the security review):** CORS origin allowlist (pre-existing `*` reflection;
+  separate change to avoid risking the live connector); `stats` is journal-wide (leaks a cross-tenant event
+  count — scope per-tenant if teams' activity is sensitive); OAuth `sub` hardcoded "owner" in logs (cosmetic).
+
 ## Pending / next steps (Alvin's queue)
 1. **Disable Bot Fight Mode** for the zone before relying on the claude.ai web connector.
 2. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
