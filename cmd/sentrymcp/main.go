@@ -204,6 +204,7 @@ func (s *server) serveHTTP(addr string) {
 		mux.HandleFunc("/token", s.oauth.handleToken)
 	}
 	mux.HandleFunc("/admin/corpus", s.handleAdminCorpus)
+	mux.HandleFunc("/admin/journal", s.handleAdminJournal)
 	mux.HandleFunc("/", s.handleHTTP)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "sentrymcp http: %v\n", err)
@@ -269,6 +270,87 @@ func (s *server) handleAdminCorpus(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
+}
+
+// handleAdminJournal serves a tenant's recent SEMANTIC journal events
+// (memory writes, tombstones, agent messages) for the dashboard's journal panel.
+// Access/PathMap records are excluded (bulk telemetry, no cheap id→path). Auth +
+// tenant via resolveTenant. Server-to-server only.
+func (s *server) handleAdminJournal(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := s.resolveTenant(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	limit := 60
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	type ev struct {
+		Seq  uint64 `json:"seq"`
+		TS   int64  `json:"ts"`
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	events := make([]ev, 0, limit)
+	t := tenant
+	s.store.Scan(sentry.Filter{Tenant: &t}, func(rec sentry.Record) bool {
+		var e ev
+		e.Seq = uint64(rec.Seq)
+		e.TS = rec.Tstamp / 1e6
+		switch rec.Type {
+		case memory.EventMemory:
+			var p memory.MemoryPayload
+			if sentry.UnmarshalPayload(rec.Payload, &p) != nil {
+				return true
+			}
+			e.Type = "Memory"
+			e.Text = fmt.Sprintf("#%d %s", p.ID, truncRunes(p.Text, 80))
+		case memory.EventForget:
+			var p memory.ForgetPayload
+			if sentry.UnmarshalPayload(rec.Payload, &p) != nil {
+				return true
+			}
+			e.Type = "Forget"
+			e.Text = fmt.Sprintf("tombstone #%d", p.ID)
+		case comms.EventMessage:
+			var p comms.MessagePayload
+			if sentry.UnmarshalPayload(rec.Payload, &p) != nil {
+				return true
+			}
+			e.Type = "Message"
+			tgt := ""
+			if p.Target != "" {
+				tgt = " → " + p.Target
+			}
+			e.Text = fmt.Sprintf("%s%s @%s: %s", p.From, tgt, p.Area, truncRunes(p.Text, 60))
+		default:
+			return true
+		}
+		events = append(events, e)
+		if len(events) > limit {
+			events = events[len(events)-limit:]
+		}
+		return true
+	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(struct {
+		Events []ev `json:"events"`
+	}{Events: events})
+}
+
+// truncRunes shortens s to n runes, appending an ellipsis when cut.
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {

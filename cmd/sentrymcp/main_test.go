@@ -434,6 +434,57 @@ func TestAdminCorpusRequiresAuthWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestAdminJournalReturnsSemanticEvents(t *testing.T) {
+	s := newMemServer(t)
+	id1, _, _, _ := s.mem.Remember(s.tenant, "first memory text", memory.RememberOpts{})
+	s.mem.Remember(s.tenant, "second memory text", memory.RememberOpts{})
+	s.mem.Forget(s.tenant, id1)
+	_, _, _ = s.reg.Record(s.tenant, "/some/path", "Read") // an Access event — must NOT appear
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/journal", nil)
+	rec := httptest.NewRecorder()
+	s.handleAdminJournal(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Events []struct {
+			Seq  uint64 `json:"seq"`
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Events) != 3 {
+		t.Fatalf("want 3 semantic events (2 Memory + 1 Forget), got %d: %+v", len(out.Events), out.Events)
+	}
+	for _, e := range out.Events {
+		if e.Type == "Access" {
+			t.Fatal("Access events must be excluded")
+		}
+	}
+	if out.Events[0].Type != "Memory" || out.Events[2].Type != "Forget" {
+		t.Fatalf("unexpected types/order: %+v", out.Events)
+	}
+}
+
+func TestAdminJournalRequiresAuthWhenConfigured(t *testing.T) {
+	s := newMemServer(t)
+	s.token = "owner-secret"
+	reg, err := loadTokenRegistry("", "owner-secret", s.tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.tokens = reg
+	rec := httptest.NewRecorder()
+	s.handleAdminJournal(rec, httptest.NewRequest(http.MethodGet, "/admin/journal", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no bearer must be 401, got %d", rec.Code)
+	}
+}
+
 func TestCommsPostReadPromote(t *testing.T) {
 	s := newMemServer(t) // *server with mem + chat over a temp journal, default tenant 1
 	post := func(area, from, text string) rpcReq {
