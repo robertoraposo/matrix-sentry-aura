@@ -397,6 +397,16 @@ the OAuth consent passphrase (claude.ai) → that team's tenant. The storage lay
   separate change to avoid risking the live connector); `stats` is journal-wide (leaks a cross-tenant event
   count — scope per-tenant if teams' activity is sensitive); OAuth `sub` hardcoded "owner" in logs (cosmetic).
 
+## Field status (2026-06-15)
+
+Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
+clients on one tenant (tenant 1): Claude Code, Xiaomi MiMo, Zed, OpenCode, and Devin (Devin via a custom MCP
+connector to `https://mcp.blazesphere.net/mcp` with the owner bearer). Journal ids are climbing fast (memory
+ids past #140), confirming real cross-client traffic. Engine ≈0.984 recall@10; curation set complete; τ=0.45;
+multi-tenant built (deploy-pending). **Next lever (starting now): real-time agent synchronization** — a comms
+"area" on Matrix where several agents working different parts of ONE project post questions/answers and
+request info from each other (agent-to-agent pub/sub over the journal). Corpus status memory: #140 (supersedes #20).
+
 ## Pending / next steps (Alvin's queue)
 1. **Disable Bot Fight Mode** for the zone before relying on the claude.ai web connector.
 2. **Scale path:** swap memory.Store's exact search for `ivf.Recommended`+`SearchRerank` when a tenant's
