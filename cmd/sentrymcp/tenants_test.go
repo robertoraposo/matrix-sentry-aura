@@ -9,7 +9,9 @@ import (
 func TestRegistryOwnerAndTeams(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "tokens.json")
-	os.WriteFile(f, []byte(`[{"secret":"team-acme-sec","tenant":2,"label":"acme"},{"secret":"team-bolt-sec","tenant":3,"label":"bolt"}]`), 0o600)
+	if err := os.WriteFile(f, []byte(`[{"secret":"team-acme-sec","tenant":2,"label":"acme"},{"secret":"team-bolt-sec","tenant":3,"label":"bolt"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	reg, err := loadTokenRegistry(f, "owner-sec", 1)
 	if err != nil {
@@ -40,6 +42,9 @@ func TestRegistryStandaloneNoFile(t *testing.T) {
 	if _, ok := reg.Tenant("anything-else"); ok {
 		t.Fatal("standalone registry must only know the owner secret")
 	}
+	if _, ok := reg.Tenant(""); ok {
+		t.Fatal("empty secret must be (_, false)")
+	}
 }
 
 func TestRegistryRejectsBadEntries(t *testing.T) {
@@ -47,9 +52,13 @@ func TestRegistryRejectsBadEntries(t *testing.T) {
 	for _, bad := range []string{
 		`[{"secret":"x","tenant":0,"label":"z"}]`,
 		`[{"secret":"owner-sec","tenant":9,"label":"dup"}]`,
+		`[{"secret":"","tenant":2,"label":"empty"}]`,
+		`[{"secret":"dup","tenant":2,"label":"a"},{"secret":"dup","tenant":3,"label":"b"}]`,
 	} {
 		f := filepath.Join(dir, "t.json")
-		os.WriteFile(f, []byte(bad), 0o600)
+		if err := os.WriteFile(f, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := loadTokenRegistry(f, "owner-sec", 1); err == nil {
 			t.Fatalf("expected load error for %s", bad)
 		}

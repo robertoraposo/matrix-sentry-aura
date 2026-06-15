@@ -45,6 +45,7 @@ func loadTokenRegistry(path, ownerSecret string, ownerTenant sentry.TenantID) (*
 	if err := json.Unmarshal(data, &teams); err != nil {
 		return nil, fmt.Errorf("tokens file: parse: %w", err)
 	}
+	seen := map[string]bool{}
 	for _, e := range teams {
 		if e.Secret == "" || e.Tenant == 0 {
 			return nil, fmt.Errorf("tokens file: entry %q has empty secret or tenant 0", e.Label)
@@ -52,6 +53,10 @@ func loadTokenRegistry(path, ownerSecret string, ownerTenant sentry.TenantID) (*
 		if ownerSecret != "" && e.Secret == ownerSecret {
 			return nil, fmt.Errorf("tokens file: entry %q reuses the owner secret", e.Label)
 		}
+		if seen[e.Secret] {
+			return nil, fmt.Errorf("tokens file: secret reused across entries (last: %q)", e.Label)
+		}
+		seen[e.Secret] = true
 		r.entries = append(r.entries, e)
 	}
 	return r, nil
