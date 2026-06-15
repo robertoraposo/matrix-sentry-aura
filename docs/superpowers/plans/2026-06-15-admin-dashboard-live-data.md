@@ -397,14 +397,19 @@ func pca3(vecs [][]float32) [][3]float32 {
 			mom[c] += s * s
 		}
 	}
-	const scale = 9.0
-	for c := 0; c < 3; c++ {
-		std := math.Sqrt(mom[c] / float64(n))
-		if std < 1e-9 {
-			std = 1
-		}
-		for i := 0; i < n; i++ {
-			out[i][c] = float32(float64(out[i][c]) / std * scale)
+	// Single global scale (by PC0's std) preserves the relative variance
+	// ordering — PC0 is the widest spread — while bounding the cloud to a
+	// sensible display size. (Per-axis normalization would flatten the
+	// structure into a sphere and erase which axis carries the most variance.)
+	const scale = 12.0
+	std0 := math.Sqrt(mom[0] / float64(n))
+	if std0 < 1e-9 {
+		std0 = 1
+	}
+	factor := scale / std0
+	for i := 0; i < n; i++ {
+		for c := 0; c < 3; c++ {
+			out[i][c] = float32(float64(out[i][c]) * factor)
 		}
 	}
 	return out
