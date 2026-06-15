@@ -77,6 +77,7 @@ func main() {
 	ollamaURL := flag.String("ollama", envOr("SENTRY_OLLAMA_URL", ""), "Ollama base URL for embeddings (enables remember/recall); empty = memory tools disabled")
 	embedModel := flag.String("embed-model", envOr("SENTRY_EMBED_MODEL", "nomic-embed-text"), "embedding model name")
 	embedDim := flag.Int("embed-dim", 768, "embedding dimension (nomic-embed-text = 768)")
+	embedProvider := flag.String("embed-provider", envOr("SENTRY_EMBED_PROVIDER", "ollama"), "embedding provider: ollama | mistral")
 	dedupTau := flag.Float64("dedup-tau", envFloat("SENTRY_DEDUP_TAU", 0), "squared-L2 dedup radius for remember (0 = off); set from Phase-0 calibration")
 	flag.Parse()
 
@@ -113,11 +114,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Semantic memory is enabled only when an embedder is configured. Without
-	// -ollama the journal/telemetry tools still work; remember/recall report
-	// that embeddings are not configured rather than failing opaquely.
-	if *ollamaURL != "" {
-		emb := memory.NewOllamaEmbedder(*ollamaURL, *embedModel, *embedDim)
+	// Resolve the embedder for the configured provider. dim defaults to 768 for
+	// ollama; mistral-embed is 1024, so when the operator left -embed-dim at its
+	// ollama default we bump it to 1024 for mistral (override with -embed-dim).
+	model := *embedModel
+	dim := *embedDim
+	if *embedProvider == "mistral" {
+		if model == "nomic-embed-text" { // the ollama default — pick the mistral default instead
+			model = "mistral-embed"
+		}
+		if dim == 768 { // the ollama default
+			dim = 1024
+		}
+	}
+	emb, err := resolveEmbedder(*embedProvider, *ollamaURL, model, dim, os.Getenv("SENTRY_MISTRAL_API_KEY"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sentrymcp: %v\n", err)
+		os.Exit(1)
+	}
+	if emb != nil {
 		mem, err := memory.New(store, emb)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sentrymcp: init semantic memory: %v\n", err)
@@ -125,16 +140,16 @@ func main() {
 		}
 		s.mem = mem
 		s.mem.DedupThreshold = float32(*dedupTau)
-		moko.Info("semantic memory enabled", map[string]string{"ollama": *ollamaURL, "model": *embedModel, "dim": fmt.Sprint(*embedDim)})
+		moko.Info("semantic memory enabled", map[string]string{"provider": *embedProvider, "model": model, "dim": fmt.Sprint(dim)})
 	}
 
 	// Native OAuth for claude.ai connectors: enabled when an issuer URL is set.
 	// The approval passphrase is the existing SENTRY_MCP_TOKEN, so the owner
 	// already holds it. Requires HTTP transport.
 	if *oauthIssuer != "" {
-		secret := os.Getenv("SENTRY_MCP_TOKEN")
+		secret := oauthSigningKey(os.Getenv("SENTRY_OAUTH_KEY"), os.Getenv("SENTRY_MCP_TOKEN"))
 		if secret == "" {
-			fmt.Fprintln(os.Stderr, "sentrymcp: -oauth-issuer requires SENTRY_MCP_TOKEN (used as the consent passphrase + signing key)")
+			fmt.Fprintln(os.Stderr, "sentrymcp: -oauth-issuer requires SENTRY_OAUTH_KEY (or SENTRY_MCP_TOKEN) as the JWT signing key")
 			os.Exit(1)
 		}
 		s.oauth = newOAuth(*oauthIssuer, secret, s.tokens.Tenant)
