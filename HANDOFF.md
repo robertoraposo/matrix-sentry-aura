@@ -383,6 +383,16 @@ the OAuth consent passphrase (claude.ai) → that team's tenant. The storage lay
   (standalone, your tenant-1 corpus intact). NOT YET deployed — pending the owner's go (or until a real team
   exists). A teams-only 2nd server can run with ONLY `tokens.json` (no owner token, no oauth) — the bypass fix
   makes that require a valid team bearer.
+- **Deploy runbook (when onboarding a team) — leaves 8808 untouched:**
+  ```
+  # 1. build + ship
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/sentrymcp ./cmd/sentrymcp
+  scp /tmp/sentrymcp matrix-sentry:/root/sentrymcp-mt
+  # 2. on the VM: tokens.json (secret generated ON the VM, never in chat), one team per line
+  ssh matrix-sentry 'S=$(openssl rand -hex 16); printf "[{\"secret\":\"%s\",\"tenant\":2,\"label\":\"team-acme\"}]" "$S" > /root/sentry-tokens.json; chmod 600 /root/sentry-tokens.json; echo "team-acme key: $S"'  # copy the key to the team out-of-band
+  # 3. systemd unit sentrymcp-mt (Restart=always): -http :8809 -dir /root/sentry-journal-mt, env SENTRY_TOKENS_FILE=/root/sentry-tokens.json + SENTRY_OLLAMA_URL + SENTRY_EMBED_MODEL; NO SENTRY_MCP_TOKEN, NO oauth ⇒ teams-only, auth required. Expose via a tunnel path if remote.
+  # add more teams: append a line (unique secret, tenant 3,4,…) + restart sentrymcp-mt.
+  ```
 - **Deferred follow-ups (from the security review):** CORS origin allowlist (pre-existing `*` reflection;
   separate change to avoid risking the live connector); `stats` is journal-wide (leaks a cross-tenant event
   count — scope per-tenant if teams' activity is sensitive); OAuth `sub` hardcoded "owner" in logs (cosmetic).
