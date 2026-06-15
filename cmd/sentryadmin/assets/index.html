@@ -462,6 +462,7 @@ class Component extends DCLogic {
       base + "/examples/js/postprocessing/UnrealBloomPass.js",
       base + "/examples/js/controls/OrbitControls.js",
       "corpus.js",
+      "live.js",
       "galaxy.js",
     ];
     try {
@@ -469,6 +470,7 @@ class Component extends DCLogic {
     } catch (e) { console.error(e); return; }
     if (this._dead) return;
 
+    await window.MatrixLive.prime(this.state.tenant);
     this.corpusData = window.MatrixCorpus.generate(this.state.tenant, 1800);
     this.galaxy = new window.MatrixGalaxy(this.canvasRef.current, this.layerRef.current, {
       onSelect: (d) => this._onSelect(d),
@@ -511,20 +513,24 @@ class Component extends DCLogic {
   selectTenant(key) {
     if (!this.galaxy) return;
     if (this.state.splitArm && key !== this.state.tenant) {
-      const dataB = window.MatrixCorpus.generate(key, 1400);
-      this.galaxy.setData(this.corpusData, dataB);
-      const name = (this.TENANTS.find((t) => t.key === key) || {}).name;
-      this.setState({ splitB: key, splitArm: false, selected: null });
-      this.pushEvent("Memory", "split de aislamiento activado · " + name);
+      window.MatrixLive.prime(key).then(() => {
+        const dataB = window.MatrixCorpus.generate(key, 1400);
+        this.galaxy.setData(this.corpusData, dataB);
+        const name = (this.TENANTS.find((t) => t.key === key) || {}).name;
+        this.setState({ splitB: key, splitArm: false, selected: null });
+        this.pushEvent("Memory", "split de aislamiento activado · " + name);
+      });
       return;
     }
     if (key === this.state.tenant && !this.state.splitB) return;
-    this.corpusData = window.MatrixCorpus.generate(key, 1800);
-    this.galaxy.setData(this.corpusData);
-    this.setState({ tenant: key, splitB: null, splitArm: false, selected: null, comms: window.MatrixCorpus.comms(key) });
-    this._animateMetrics();
-    const name = (this.TENANTS.find((t) => t.key === key) || {}).name;
-    this.pushEvent("Access", "tenant → " + name + " · re-anclando corpus");
+    window.MatrixLive.prime(key).then(() => {
+      this.corpusData = window.MatrixCorpus.generate(key, 1800);
+      this.galaxy.setData(this.corpusData);
+      this.setState({ tenant: key, splitB: null, splitArm: false, selected: null, comms: window.MatrixCorpus.comms(key) });
+      this._animateMetrics();
+      const name = (this.TENANTS.find((t) => t.key === key) || {}).name;
+      this.pushEvent("Access", "tenant → " + name + " · re-anclando corpus");
+    });
   }
   onSplitClick() {
     if (this.state.splitB) {
