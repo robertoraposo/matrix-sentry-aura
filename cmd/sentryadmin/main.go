@@ -46,6 +46,16 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
 	})
+	mcpURL := os.Getenv("SENTRY_ADMIN_MCP_URL")
+	mcpToken := os.Getenv("SENTRY_ADMIN_MCP_TOKEN")
+	if mcpURL != "" {
+		api := newAPIServer(mcpURL, mcpToken)
+		mux.HandleFunc("/api/galaxy", api.handleGalaxy)
+		mux.HandleFunc("/api/comms", api.handleComms)
+		fmt.Fprintf(os.Stderr, "sentryadmin: live data ON (mcp %s)\n", mcpURL)
+	} else {
+		fmt.Fprintln(os.Stderr, "sentryadmin: live data OFF (set SENTRY_ADMIN_MCP_URL) — serving mock")
+	}
 	mux.Handle("/", basicAuth(user, pass, fileServer))
 
 	srv := &http.Server{
