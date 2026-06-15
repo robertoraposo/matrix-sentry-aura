@@ -292,6 +292,21 @@ func (s *Store) Recall(tenant sentry.TenantID, query string, k int) ([]Memory, e
 	return scored, nil
 }
 
+// List returns a snapshot copy of all of one tenant's live memories (including
+// their vectors), for admin/visualization use. Read-only; other tenants are
+// excluded. Order is insertion order; not a recall (no scoring).
+func (s *Store) List(tenant sentry.TenantID) []MemoryPayload {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]MemoryPayload, 0)
+	for _, e := range s.entries {
+		if e.tenant == tenant {
+			out = append(out, e.mem)
+		}
+	}
+	return out
+}
+
 // Count returns how many memories tenant has stored.
 func (s *Store) Count(tenant sentry.TenantID) int {
 	s.mu.Lock()

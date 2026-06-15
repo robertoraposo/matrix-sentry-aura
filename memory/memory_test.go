@@ -514,3 +514,28 @@ func TestDoubleForgetIsNoOp(t *testing.T) {
 		t.Fatal("second forget of the same id should return false (already gone)")
 	}
 }
+
+func TestListReturnsTenantEntriesWithVectors(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	if _, _, _, err := st.Remember(1, "alpha one", RememberOpts{Tags: []string{"a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := st.Remember(1, "alpha two", RememberOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := st.Remember(2, "other tenant", RememberOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	got := st.List(1)
+	if len(got) != 2 {
+		t.Fatalf("tenant 1 should have 2 memories, got %d", len(got))
+	}
+	for _, m := range got {
+		if len(m.Vector) == 0 {
+			t.Fatalf("List must include vectors, id %d had none", m.ID)
+		}
+		if m.Text == "other tenant" {
+			t.Fatal("List leaked another tenant's memory")
+		}
+	}
+}
