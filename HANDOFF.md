@@ -483,6 +483,35 @@ basic-auth via `SENTRY_ADMIN_USER`/`SENTRY_ADMIN_PASS` (constant-time compare; o
   endpoints on sentrymcp (memories+projected vectors, journal stream, comms, per-tenant stats) + the dashboard
   fetching them with a tenant bearer. Gate behind strong auth (Cloudflare Access) BEFORE it shows real data.
 
+## ✅ ADMIN DASHBOARD — LIVE DATA (v2) — deployed (2026-06-15)
+
+The Vector Galaxy now shows the REAL tenant-1 corpus (personal server), not mock. Spec/plan
+`docs/superpowers/{specs,plans}/2026-06-15-admin-dashboard-live-data.*`.
+- **`memory.Store.List(tenant)`** — snapshot of a tenant's memories WITH vectors (read-only, mutex).
+- **`sentrymcp GET /admin/corpus`** — auth via `resolveTenant` (401/503 guarded), JSON `{tenant,dim,count,
+  memories:[{id,text,tags,src,vec}]}`. Server-to-server only. **8808 + 8809 REDEPLOYED** (additive; verified
+  8808 → tenant 1, 158→160 live memories, dim 768).
+- **`cmd/sentryadmin`**: `galaxy.go` (deterministic PCA→3D via power iteration + global PC0-std scale, k-means
+  farthest-point init); `api.go` `/api/galaxy` (fetches /admin/corpus with a server-side bearer, projects +
+  clusters + labels by dominant tag + palette, emits the EXACT corpus.js shape) and `/api/comms` (stub
+  `{columns,agents}` empty — real comms is a follow-up). **/api/* gated behind the same basic-auth** as the
+  page (security review fix). `live.js` shim swaps `MatrixCorpus.generate/comms` for the live data with mock
+  fallback; `index.html` awaits `MatrixLive.prime` in `_boot` and `selectTenant` (`.then` wrap).
+- **Env on server2** (`/root/sentryadmin.env`, chmod 600): `SENTRY_ADMIN_MCP_URL=http://<server1-LAN>:8808`,
+  `SENTRY_ADMIN_MCP_TOKEN=<personal SENTRY_MCP_TOKEN>` (token only on the box). Live data ON.
+- **VERIFIED end-to-end**: `/api/galaxy` returns 160 real points clustered by REAL tags (ashley, lacuarta-pos,
+  blazeteams, threejs); rendered in a real browser (Playwright) with 0 console errors; clicking nodes shows
+  real memory text. Still internal-only + basic-auth (LAN / `ssh -L 8810:localhost:8810 matrix-sentry2`).
+- **GOTCHA fixed during verification**: the live data shapes MUST match the mock's exactly or galaxy.js
+  crashes in the render loop. Two mismatches caught only by browser verification (curl/unit tests passed):
+  comms must be `{columns,agents}` not `{areas,messages}`; the galaxy `tenant` object must include a non-empty
+  `agents[]` (the simulated journal indexes `tenant.agents` at random). Lesson: verify the artifact in a real
+  browser, not just the API shape.
+- **Follow-ups**: real access-frequency heat (id-rank proxy now); real timestamps; live journal + comms
+  content; per-tenant selector wired to all team bearers (currently one configured bearer → the selector shows
+  the same corpus for every tab); cluster labels can repeat (k-means makes N spatial clusters but a few share a
+  dominant tag) — dedupe labels later.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
