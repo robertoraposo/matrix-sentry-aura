@@ -463,6 +463,26 @@ personal server is byte-for-byte UNCHANGED. Spec/plan `docs/superpowers/{specs,p
   768-dim Mistral model couldn't override); OAuth-enabled + empty registry would 401 all consent (N/A here —
   registry has 3 teams).
 
+## ✅ ADMIN DASHBOARD (Vector Galaxy) — deployed INTERNAL-only (2026-06-15)
+
+The Claude Design "Vector Galaxy" admin UI, shipped as a Go static server. `cmd/sentryadmin/main.go`
+embeds (`go:embed assets`) the standalone artifact (index.html + galaxy.js Three.js + corpus.js synthetic
+data + support.js = the Claude Design runtime that pulls React/ReactDOM/Babel from unpkg + three@0.137 from
+jsdelivr, reads its own HTML via `fetch(location.href)`). So it only needs HTTP serving. Optional HTTP
+basic-auth via `SENTRY_ADMIN_USER`/`SENTRY_ADMIN_PASS` (constant-time compare; open when unset). 3 tests green.
+- **Verified rendering** end-to-end with Playwright (local python AND the Go binary): galaxy + clusters
+  (AUTH/DEPLOY/DECISIONES/GOTCHAS/INFRA), access-control panel, live journal, metrics — matches the design.
+- **Deployed to server2**: `/root/sentryadmin`, systemd `sentryadmin` (Restart=always), env
+  `/root/sentryadmin.env` (chmod 600) on port 8810, basic-auth ON (user `admin`, pass generated on-server;
+  retrieve: `ssh matrix-sentry2 grep PASS /root/sentryadmin.env`). Verified: no-auth 401, with-auth 200.
+- **Exposure = INTERNAL-ONLY (owner-chosen)**: NO Cloudflare route. Reachable on the homelab LAN at
+  `http://10.10.10.175:8810` (server2 not on Tailscale). From the Mac: `ssh -L 8810:localhost:8810 matrix-sentry2`
+  then open `http://localhost:8810`. (The auto-mode classifier correctly blocked a public `admin.blazesphere.net`
+  ingress; the owner picked internal-only. cloudflared still serves only mcp + matrix.blazesphere.net.)
+- **v1 = SYNTHETIC data** (corpus.js mocks, fake keys). **v2 (NOT built)** = wire to real MCP data: needs read
+  endpoints on sentrymcp (memories+projected vectors, journal stream, comms, per-tenant stats) + the dashboard
+  fetching them with a tenant bearer. Gate behind strong auth (Cloudflare Access) BEFORE it shows real data.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
