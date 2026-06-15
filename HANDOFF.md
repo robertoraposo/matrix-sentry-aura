@@ -415,6 +415,38 @@ near-real-time. Built as a SEPARATE log from semantic memory (ordered, NO dedup,
   cleaned. `tools/list` now serves post/read/promote (9 tools). **Clients must reconnect/new-session to SEE
   the 3 new tools** (the MCP stale-tool-cache gotcha).
 
+## ✅ MISTRAL EMBEDDER + OAUTH TEAMS-ONLY — server2 deployed (2026-06-15)
+
+Second `sentrymcp` instance (server2 container `MatrixSentry2`, port 8809, journal `/root/sentry-journal-mt`)
+serving THREE real teams as isolated tenants, embedding via the Mistral API, with native OAuth — the live 8808
+personal server is byte-for-byte UNCHANGED. Spec/plan `docs/superpowers/{specs,plans}/2026-06-15-mistral-embedder-oauth-teamsonly.*`.
+- **`memory/mistral.go`** — `MistralEmbedder` mirrors `OllamaEmbedder` against Mistral's OpenAI-style
+  `POST /v1/embeddings` (`Authorization: Bearer`, `{model,input}`, decode `data[].embedding` by `index`).
+  Dim fixed at construction (mistral-embed = **1024**). Validates count + per-vector dim; **API key never
+  logged or returned in any error** (non-200 path deliberately drops the body). 6 tests (incl. duplicate-index
+  nil-slot guard), httptest, no network.
+- **`cmd/sentrymcp/embed.go`** — `resolveEmbedder(provider, ollamaURL, model, dim, mistralKey)` (ollama|mistral;
+  ollama+no-URL → nil = memory disabled; mistral+no-key → error; unknown → error) + `oauthSigningKey(oauthKey,
+  ownerToken)` (SENTRY_OAUTH_KEY wins, else owner token). Unit-tested.
+- **`main.go`** — `-embed-provider`/`SENTRY_EMBED_PROVIDER` (default `ollama` → 8808 unchanged). For `mistral`,
+  model/dim bump from the ollama defaults (nomic-embed-text→mistral-embed, 768→1024) only when left at default.
+  OAuth now sources its signing key via `oauthSigningKey` → **OAuth runs teams-only** (no owner token needed);
+  team secrets resolve as consent passphrases via `s.tokens.Tenant`. Full suite `-race` green; spec+quality+
+  final security review all ✅ (no secret-leak path, no auth bypass, back-compat intact).
+- **server2 box**: Ubuntu 24.04, 8 vCPU / 14 GiB / 189 GB (ZFS); reaches tesla Ollama (unused here) and the
+  Mistral API. systemd `sentrymcp-mt` (`Restart=always`), env `/root/sentrymcp-mt.env` (chmod 600).
+- **tenants**: BlazeSphere=2, Kuadre=3, Round PlayGames=4. `tokens.json` secrets generated ON server2
+  (`openssl rand -hex 16`, chmod 600); retrieve for out-of-band delivery with `ssh matrix-sentry2 'cat /root/sentry-tokens.json'`.
+- **VERIFIED on server2**: no-token → 401; team bearer → 9 tools; OAuth discovery issuer `https://matrix.blaze.net.do`.
+- **PENDING (owner)**: (1) set the real `SENTRY_MISTRAL_API_KEY` in `/root/sentrymcp-mt.env` (placeholder now;
+  `remember`/`recall` error until set), then `systemctl restart sentrymcp-mt`; (2) Cloudflare tunnel
+  `matrix.blaze.net.do` → `http://localhost:8809` (serves `/mcp` + OAuth `/.well-known/*`,`/authorize`,`/token`,
+  `/register`) + disable Bot Fight Mode; (3) isolation smoke (remember as BlazeSphere → recall as Kuadre must
+  NOT see it) once the key is set.
+- **Review nits noted (non-blocking)**: dim-bump fires on literal 768 (fine for mistral-embed=1024; a custom
+  768-dim Mistral model couldn't override); OAuth-enabled + empty registry would 401 all consent (N/A here —
+  registry has 3 teams).
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
