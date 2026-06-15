@@ -45,7 +45,10 @@ var tenantMeta = map[string]struct{ Key, Name, Glyph, Accent string }{
 }
 
 func (a *apiServer) fetchCorpus() (*corpusResp, error) {
-	req, _ := http.NewRequest(http.MethodGet, a.mcpURL+"/admin/corpus", nil)
+	req, err := http.NewRequest(http.MethodGet, a.mcpURL+"/admin/corpus", nil)
+	if err != nil {
+		return nil, err
+	}
 	if a.token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.token)
 	}
@@ -108,8 +111,15 @@ type galaxyCluster struct {
 	Center [3]float32 `json:"center"`
 	Count  int        `json:"count"`
 }
+type tenantInfo struct {
+	Key    string `json:"key"`
+	Name   string `json:"name"`
+	Glyph  string `json:"glyph"`
+	Accent string `json:"accent"`
+}
+
 type galaxyData struct {
-	Tenant   interface{}     `json:"tenant"`
+	Tenant   tenantInfo      `json:"tenant"`
 	Clusters []galaxyCluster `json:"clusters"`
 	Points   []galaxyPoint   `json:"points"`
 }
@@ -186,7 +196,7 @@ func buildGalaxy(tenantKey string, cr *corpusResp) galaxyData {
 	}
 	sort.SliceStable(clusters, func(i, j int) bool { return clusters[i].Key < clusters[j].Key })
 	return galaxyData{
-		Tenant:   map[string]string{"key": tm.Key, "name": tm.Name, "glyph": tm.Glyph, "accent": tm.Accent},
+		Tenant:   tenantInfo{Key: tm.Key, Name: tm.Name, Glyph: tm.Glyph, Accent: tm.Accent},
 		Clusters: clusters, Points: pts,
 	}
 }

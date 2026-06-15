@@ -85,3 +85,22 @@ func TestAPIGalaxyUpstreamErrorIs502(t *testing.T) {
 		t.Fatalf("upstream 500 → 502, got %d", rec.Code)
 	}
 }
+
+func TestAPIGalaxyTenantObject(t *testing.T) {
+	mcp := stubMCP(t, 10)
+	defer mcp.Close()
+	srv := &apiServer{mcpURL: mcp.URL, token: "x", client: http.DefaultClient}
+	rec := httptest.NewRecorder()
+	srv.handleGalaxy(rec, httptest.NewRequest(http.MethodGet, "/api/galaxy?tenant=personal", nil))
+	var d struct {
+		Tenant struct {
+			Key, Name, Glyph, Accent string
+		} `json:"tenant"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Tenant.Key != "personal" || d.Tenant.Name != "Personal" || d.Tenant.Glyph == "" || d.Tenant.Accent == "" {
+		t.Fatalf("tenant object not populated: %+v", d.Tenant)
+	}
+}
