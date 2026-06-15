@@ -526,7 +526,10 @@ class Component extends DCLogic {
     window.MatrixLive.prime(key).then(() => {
       this.corpusData = window.MatrixCorpus.generate(key, 1800);
       this.galaxy.setData(this.corpusData);
-      this.setState({ tenant: key, splitB: null, splitArm: false, selected: null, comms: window.MatrixCorpus.comms(key) });
+      this.setState({ tenant: key, splitB: null, splitArm: false, selected: null, comms: window.MatrixCorpus.comms(key) }, () => {
+        this._jSeq = null;
+        this._seedJournal();
+      });
       this._animateMetrics();
       const name = (this.TENANTS.find((t) => t.key === key) || {}).name;
       this.pushEvent("Access", "tenant → " + name + " · re-anclando corpus");
@@ -575,12 +578,28 @@ class Component extends DCLogic {
 
   // ---- journal ----
   _seedJournal() {
+    const live = window.MatrixLive && window.MatrixLive.journalEvents(this.state.tenant);
+    if (live && live.length) {
+      this._jSeq = 0;
+      live.forEach((ev) => { this.pushEvent(ev.type, ev.text, true); if (ev.seq > this._jSeq) this._jSeq = ev.seq; });
+      return;
+    }
+    this._jSeq = null;
     for (let i = 0; i < 8; i++) this.randomEvent(true);
   }
   _tickJournal() {
     if (this._dead) return;
-    this.randomEvent(false);
-    this._jt = setTimeout(() => this._tickJournal(), 1000 + Math.random() * 1500);
+    if (this._jSeq != null && window.MatrixLive) {
+      window.MatrixLive.fetchJournal(this.state.tenant).then((events) => {
+        if (this._dead || !events) return;
+        events.forEach((ev) => {
+          if (ev.seq > this._jSeq) { this.pushEvent(ev.type, ev.text, false); this._jSeq = ev.seq; }
+        });
+      });
+    } else {
+      this.randomEvent(false);
+    }
+    this._jt = setTimeout(() => this._tickJournal(), 3000 + Math.random() * 2000);
   }
   randomEvent(seed) {
     if (!this.corpusData) return;

@@ -3,6 +3,7 @@
 (function () {
   const cache = {};            // tenantKey -> galaxy data
   const commsCache = {};
+  const journalCache = {};
   window.MatrixLive = {
     async prime(tenantKey) {
       try {
@@ -13,12 +14,29 @@
           const rc = await fetch("/api/comms?tenant=" + encodeURIComponent(tenantKey));
           if (rc.ok) commsCache[tenantKey] = await rc.json();
         } catch (e) { /* comms optional */ }
+        try {
+          const rj = await fetch("/api/journal?tenant=" + encodeURIComponent(tenantKey) + "&limit=60");
+          if (rj.ok) journalCache[tenantKey] = (await rj.json()).events || [];
+        } catch (e) { /* journal optional */ }
         if (!this._patched) this._patch();
         this._patched = true;
         console.info("[live] primed", tenantKey, "points:", (cache[tenantKey].points || []).length);
       } catch (e) {
         console.warn("[live] prime failed for", tenantKey, "— using mock:", e.message);
       }
+    },
+    journalEvents(tenantKey) {
+      const e = journalCache[tenantKey];
+      return Array.isArray(e) && e.length ? e : null;
+    },
+    async fetchJournal(tenantKey) {
+      try {
+        const r = await fetch("/api/journal?tenant=" + encodeURIComponent(tenantKey) + "&limit=60");
+        if (!r.ok) return null;
+        const e = (await r.json()).events || [];
+        journalCache[tenantKey] = e;
+        return e;
+      } catch (x) { return null; }
     },
     _patch() {
       const C = window.MatrixCorpus;
