@@ -206,8 +206,8 @@ func (s *server) resolveTenant(r *http.Request) (sentry.TenantID, bool) {
 			}
 		}
 	}
-	if s.token == "" && s.oauth == nil {
-		return s.tenant, true // open/local mode (unchanged)
+	if s.token == "" && s.oauth == nil && len(s.tokens.entries) == 0 {
+		return s.tenant, true // open/local mode — no auth configured at all
 	}
 	return 0, false
 }

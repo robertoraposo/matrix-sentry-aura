@@ -297,6 +297,42 @@ func TestCallToolTenantIsolation(t *testing.T) {
 	}
 }
 
+func TestResolveTenantRoutingAndNoBypass(t *testing.T) {
+	s := &server{
+		tenant: 1,
+		tokens: &tokenRegistry{entries: []tokenEntry{{Secret: "teamsec", Tenant: 2, Label: "team"}}},
+		// s.token == "" and s.oauth == nil, but the registry is NON-empty:
+	}
+	req := func(auth string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		if auth != "" {
+			r.Header.Set("Authorization", auth)
+		}
+		return r
+	}
+	// team bearer → team tenant (end-to-end routing)
+	if tn, ok := s.resolveTenant(req("Bearer teamsec")); !ok || tn != 2 {
+		t.Fatalf("team bearer → (%d,%v), want (2,true)", tn, ok)
+	}
+	// NO bypass: unauthenticated request must NOT fall into open mode when a registry exists
+	if _, ok := s.resolveTenant(req("")); ok {
+		t.Fatal("unauthenticated request must be rejected when registry has entries (no open-mode bypass)")
+	}
+	// unknown bearer → rejected
+	if _, ok := s.resolveTenant(req("Bearer nope")); ok {
+		t.Fatal("unknown bearer must be rejected")
+	}
+}
+
+func TestResolveTenantOpenModeWhenTrulyUnconfigured(t *testing.T) {
+	// No static token, no oauth, EMPTY registry → open/local mode → default tenant.
+	s := &server{tenant: 1, tokens: &tokenRegistry{}}
+	r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	if tn, ok := s.resolveTenant(r); !ok || tn != 1 {
+		t.Fatalf("open mode → (%d,%v), want (1,true)", tn, ok)
+	}
+}
+
 func TestBoolArg(t *testing.T) {
 	if !boolArg(map[string]any{"force": true}, "force") {
 		t.Fatal("true not parsed")

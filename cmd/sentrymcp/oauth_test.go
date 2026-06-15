@@ -217,7 +217,7 @@ func TestAuthorizeRejectsBadPassphrase(t *testing.T) {
 	o := newTestOAuth()
 	form := url.Values{
 		"response_type": {"code"}, "client_id": {"c"}, "redirect_uri": {"https://claude.ai/cb"},
-		"code_challenge": {"ch"}, "state": {"s"}, "passphrase": {"WRONG"},
+		"code_challenge": {"ch"}, "code_challenge_method": {"S256"}, "state": {"s"}, "passphrase": {"WRONG"},
 	}
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -225,6 +225,10 @@ func TestAuthorizeRejectsBadPassphrase(t *testing.T) {
 	o.handleAuthorize(rec, req)
 	if rec.Code == http.StatusFound {
 		t.Fatal("bad passphrase produced a redirect with a code")
+	}
+	// Must reach the passphrase check (not bail early on PKCE), so expect 401 not 400.
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong passphrase must return 401 (passphrase branch), got %d", rec.Code)
 	}
 }
 
