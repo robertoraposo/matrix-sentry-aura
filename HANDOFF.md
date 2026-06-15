@@ -512,6 +512,25 @@ The Vector Galaxy now shows the REAL tenant-1 corpus (personal server), not mock
   the same corpus for every tab); cluster labels can repeat (k-means makes N spatial clusters but a few share a
   dominant tag) — dedupe labels later.
 
+## ✅ ADMIN DASHBOARD — LIVE JOURNAL (v2.1) — deployed (2026-06-15)
+
+The Journal panel was the last mock piece; now it shows the REAL append-only journal. Spec/plan
+`docs/superpowers/{specs,plans}/2026-06-15-admin-live-journal.*`.
+- **`sentrymcp GET /admin/journal?limit=N`** (auth via resolveTenant, default 60 cap 200): scans the journal by
+  tenant, decodes the SEMANTIC events only — `EventMemory`→"#id text", `EventForget`→"tombstone #id",
+  `EventMessage`→"from → target @area: text"; EXCLUDES Access/PathMap (bulk path telemetry, ~26k, no cheap
+  id→path) and recall (not journaled). Returns `{events:[{seq,ts,type,text}]}`, last N. 8808 + 8809 redeployed.
+- **`sentryadmin GET /api/journal`** — gated (basic-auth) passthrough that proxies /admin/journal with the
+  server-side bearer; 502 on upstream error.
+- **Frontend** (live.js + index.html): `MatrixLive.journalEvents/fetchJournal`; `_seedJournal` seeds from the
+  real journal (tracking `_jSeq`) else the synthetic 8 events; `_tickJournal` polls `/api/journal` every ~3-5s
+  and pushes only events with `seq > _jSeq`, else runs the synthetic generator; `selectTenant` re-seeds via a
+  setState callback. User-action `pushEvent` lines (select/recall/forget) stay (they're real UI feedback).
+- **VERIFIED**: /admin/journal → real Memory events (#209-#213…); browser (Playwright, local binary vs real
+  8808) renders the panel with real memory ids/text, 0 console errors (favicon only); server2 /api/journal live.
+- **Follow-ups**: Access events with resolved paths (needs id→path index in Registry); SSE push; real
+  per-event agent attribution.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
