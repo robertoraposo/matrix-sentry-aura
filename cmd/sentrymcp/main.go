@@ -599,7 +599,10 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		if !ok {
 			return s.toolErr(req.ID, fmt.Sprintf("message #%d not found in %s", seq, area))
 		}
-		tags := append(stringsArg(p.Args, "tags"), "promoted")
+		userTags := stringsArg(p.Args, "tags")
+		tags := make([]string, len(userTags)+1)
+		copy(tags, userTags)
+		tags[len(userTags)] = "promoted"
 		s.mu.Lock()
 		id, _, _, err := s.mem.Remember(tenant, fmt.Sprintf("[%s %s#%d] %s", m.From, area, seq, m.Text), memory.RememberOpts{Tags: tags, Src: "promote"})
 		s.mu.Unlock()

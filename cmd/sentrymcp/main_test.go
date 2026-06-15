@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -351,6 +352,38 @@ func TestBoolArg(t *testing.T) {
 	}
 	if boolArg(map[string]any{"force": "yes"}, "force") {
 		t.Fatal("non-bool should be false")
+	}
+}
+
+func TestCommsPromote(t *testing.T) {
+	s := newMemServer(t)
+	textOf := func(r rpcResp) string { b, _ := json.Marshal(r.Result); return string(b) }
+	call := func(name string, args map[string]any) rpcResp {
+		a, _ := json.Marshal(map[string]any{"name": name, "arguments": args})
+		return s.callTool(rpcReq{ID: json.RawMessage("1"), Method: "tools/call", Params: a}, 1)
+	}
+	// post a message, capture its seq from "posted message #N in area"
+	postText := textOf(call("post", map[string]any{"area": "proj/x", "from": "be", "text": "use Fiber not chi"}))
+	var seq int
+	if _, err := fmt.Sscanf(postText, `{"content":[{"text":"posted message #%d`, &seq); err != nil || seq == 0 {
+		// fallback: extract the first integer after '#'
+		i := strings.Index(postText, "#")
+		if i >= 0 {
+			fmt.Sscanf(postText[i+1:], "%d", &seq)
+		}
+	}
+	if seq == 0 {
+		t.Fatalf("could not parse seq from post response: %s", postText)
+	}
+	// promote it → should report a memory id
+	got := textOf(call("promote", map[string]any{"area": "proj/x", "seq": float64(seq)}))
+	if !strings.Contains(got, "memory #") {
+		t.Fatalf("promote did not create a memory: %s", got)
+	}
+	// promote a missing seq → not-found error
+	missing := textOf(call("promote", map[string]any{"area": "proj/x", "seq": float64(999999)}))
+	if !strings.Contains(strings.ToLower(missing), "not found") {
+		t.Fatalf("promote of missing seq should say not found: %s", missing)
 	}
 }
 
