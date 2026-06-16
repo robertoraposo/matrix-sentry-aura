@@ -550,6 +550,23 @@ From a live-corpus effectiveness analysis (tenant 1, 227 mems, 28k events, LIFT 
   ranking/coverage misses the gap can't fix (relevant memory buried or absent) — that (recall relevance +
   coverage, the #4 loop) is the real frontier, not the gap value.
 
+## ✅ RECALL OBSERVABILITY (#4 v1) — deployed (2026-06-16)
+
+Made recall observable so its relevance + coverage can be measured on REAL traffic (recall was previously
+unjournaled — zero usage data). Spec/plan `docs/superpowers/{specs,plans}/2026-06-16-recall-observability.*`.
+- **`memory.EventRecall` (type 6) + `RecallPayload{Query,K,Hits[]{ID,Dist}}`** — telemetry, NOT replayed by
+  `New` (the rebuild only scans EventMemory/Forget). `memory.Store.Recall` stays a pure read.
+- **MCP recall handler journals each recall** (best-effort: append error → MokoBlinks only, recall response
+  unaffected), gated by `SENTRY_RECALL_LOG` (default true; `0`/`false` disables — the volume knob, since the
+  SessionStart auto-recall hook fires recalls across clients). Tenant-scoped.
+- **`analyze_recall` tool** (mirrors analyze_access): scans the tenant's EventRecall → total/empty, top-hit
+  distance distribution (min/p50/p90/max), and recent real queries. 8808 + 8809 redeployed.
+- **VERIFIED live + the coverage signal is real**: an on-topic query ("cómo se calibró tau") top-dist 1.097 vs
+  a nonsense query ("xyzzy…") 1.513 — the bimodal separation we will calibrate a "no good match" floor on.
+- **Next (#4 v2)**: after real traffic accumulates, (a) calibrate a per-embedder coverage floor from the real
+  top-dist distribution (surface "no strong match" / flag gaps), and (b) an LLM-judge pass over the EventRecall
+  log scoring whether returned memories were relevant to each real query — the true closed-loop relevance metric.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
