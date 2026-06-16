@@ -513,3 +513,37 @@ func TestCommsPostReadPromote(t *testing.T) {
 		t.Fatalf("missing area should error mentioning area: %s", got)
 	}
 }
+
+func TestRecallIsJournaledWhenEnabled(t *testing.T) {
+	s := newMemServer(t)
+	s.logRecall = true
+	s.mem.Remember(s.tenant, "deploy on fridays", memory.RememberOpts{})
+
+	callNamed(s, "recall", map[string]any{"query": "deploy on fridays", "k": float64(3)})
+
+	et := memory.EventRecall
+	var found *memory.RecallPayload
+	s.store.Scan(sentry.Filter{Tenant: &s.tenant, Type: &et}, func(r sentry.Record) bool {
+		var p memory.RecallPayload
+		if sentry.UnmarshalPayload(r.Payload, &p) == nil {
+			found = &p
+		}
+		return true
+	})
+	if found == nil || found.Query != "deploy on fridays" || len(found.Hits) == 0 {
+		t.Fatalf("recall not journaled correctly: %+v", found)
+	}
+}
+
+func TestRecallNotJournaledWhenDisabled(t *testing.T) {
+	s := newMemServer(t)
+	s.logRecall = false
+	s.mem.Remember(s.tenant, "x", memory.RememberOpts{})
+	callNamed(s, "recall", map[string]any{"query": "x", "k": float64(3)})
+	et := memory.EventRecall
+	n := 0
+	s.store.Scan(sentry.Filter{Tenant: &s.tenant, Type: &et}, func(r sentry.Record) bool { n++; return true })
+	if n != 0 {
+		t.Fatalf("logging disabled but %d EventRecall written", n)
+	}
+}

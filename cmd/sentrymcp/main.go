@@ -57,16 +57,17 @@ type rpcErr struct {
 }
 
 type server struct {
-	mu     sync.Mutex // serializes Append-bearing tool calls deterministically
-	store  *sentry.Store
-	reg    *sentry.Registry // path→id dictionary for real (file-path) accesses
-	mem    *memory.Store    // semantic memory (nil when no embedder is configured)
-	chat   *comms.Store     // agent communication channel
-	oauth  *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
-	moko   *mokoblinks.Client
-	tenant sentry.TenantID
-	token  string          // optional bearer auth for HTTP transport
-	tokens *tokenRegistry  // secret→tenant; owner built-in, teams from SENTRY_TOKENS_FILE
+	mu        sync.Mutex // serializes Append-bearing tool calls deterministically
+	store     *sentry.Store
+	reg       *sentry.Registry // path→id dictionary for real (file-path) accesses
+	mem       *memory.Store    // semantic memory (nil when no embedder is configured)
+	chat      *comms.Store     // agent communication channel
+	oauth     *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
+	moko      *mokoblinks.Client
+	tenant    sentry.TenantID
+	token     string         // optional bearer auth for HTTP transport
+	tokens    *tokenRegistry // secret→tenant; owner built-in, teams from SENTRY_TOKENS_FILE
+	logRecall bool           // journal recall queries as EventRecall (SENTRY_RECALL_LOG)
 }
 
 func main() {
@@ -96,7 +97,7 @@ func main() {
 	}
 
 	moko := mokoblinks.FromEnv()
-	s := &server{store: store, reg: reg, moko: moko, tenant: sentry.TenantID(*tenant)}
+	s := &server{store: store, reg: reg, moko: moko, tenant: sentry.TenantID(*tenant), logRecall: envBool("SENTRY_RECALL_LOG", true)}
 
 	s.chat, err = comms.New(store)
 	if err != nil {
@@ -648,6 +649,15 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		if err != nil {
 			return s.toolErr(req.ID, "recall failed: "+err.Error())
 		}
+		if s.logRecall {
+			rp := memory.RecallPayload{Query: query, K: k, Hits: make([]memory.RecallHit, len(hits))}
+			for i, h := range hits {
+				rp.Hits[i] = memory.RecallHit{ID: h.ID, Dist: h.Score}
+			}
+			if _, aerr := s.store.Append(tenant, memory.EventRecall, rp); aerr != nil {
+				s.moko.Info("recall-log failed", map[string]string{"tenant": fmt.Sprint(tenant), "err": aerr.Error()})
+			}
+		}
 		s.moko.Info("recall", map[string]string{"tenant": fmt.Sprint(tenant), "k": fmt.Sprint(k), "hits": fmt.Sprint(len(hits))})
 		return s.toolText(req.ID, formatRecall(query, hits))
 	case "forget":
@@ -807,6 +817,14 @@ func envFloat(key string, def float64) float64 {
 		fmt.Fprintf(os.Stderr, "sentrymcp: %s=%q: not a valid float, using default %v\n", key, v, def)
 	}
 	return def
+}
+
+func envBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	return v != "0" && strings.ToLower(v) != "false"
 }
 
 func liftVerdict(lift float64) string {
