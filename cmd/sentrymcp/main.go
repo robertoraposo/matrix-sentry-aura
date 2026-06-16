@@ -79,7 +79,7 @@ func main() {
 	embedDim := flag.Int("embed-dim", 768, "embedding dimension (nomic-embed-text = 768)")
 	embedProvider := flag.String("embed-provider", envOr("SENTRY_EMBED_PROVIDER", "ollama"), "embedding provider: ollama | mistral")
 	dedupTau := flag.Float64("dedup-tau", envFloat("SENTRY_DEDUP_TAU", 0), "squared-L2 dedup radius for remember (0 = off); set from Phase-0 calibration")
-	recallGap := flag.Float64("recall-gap", envFloat("SENTRY_RECALL_GAP", 1.25), "truncate recall at the first distance cliff of this ratio (0 = off, plain top-k)")
+	recallGap := flag.Float64("recall-gap", envFloat("SENTRY_RECALL_GAP", 1.20), "truncate recall at the first distance cliff of this ratio (0 = off, plain top-k); 1.20 = calibrated over 20 real queries (F1 peak 1.15-1.20, dominates 1.25)")
 	flag.Parse()
 
 	store, err := sentry.Open(*dir, sentry.Options{FsyncEvery: 75 * time.Millisecond})
