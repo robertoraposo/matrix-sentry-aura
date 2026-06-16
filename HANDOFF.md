@@ -531,6 +531,19 @@ The Journal panel was the last mock piece; now it shows the REAL append-only jou
 - **Follow-ups**: Access events with resolved paths (needs id→path index in Registry); SSE push; real
   per-event agent attribution.
 
+## ✅ EFFECTIVENESS FIXES — tag normalize + recall gap (2026-06-16)
+
+From a live-corpus effectiveness analysis (tenant 1, 227 mems, 28k events, LIFT 16.6%): two fixes, deployed
+8808 + 8809.
+- **Tag normalization** (`memory.normalizeTags`): lowercase+trim+dedupe applied on `Remember` (writes) AND on
+  the `New` rebuild scan — so the existing `ASHLEY`(60)/`ashley`(84) fragmentation collapsed to one `ashley`
+  (146) in the live index WITHOUT rewriting the append-only journal (disk verbatim, serving view normalized).
+  Verified post-deploy: zero uppercase/mixed tags remain.
+- **Recall gap-truncation** (`memory.Store.RecallGap`, env `SENTRY_RECALL_GAP` default 1.25): `Recall` truncates
+  at the first relevance cliff (`dist[i] > dist[i-1]·gap`), always keeps ≥1, k stays the cap. Ratio-based →
+  embedder-agnostic (nomic-768 + mistral-1024). `0` disables (plain top-k). Verified: the dedup-τ probe now
+  returns 1 hit (was 4 — the 1.42+ padding trimmed). Follow-up: calibrate the 1.25 default over a query set.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
