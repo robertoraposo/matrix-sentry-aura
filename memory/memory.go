@@ -28,6 +28,23 @@ const EventMemory sentry.EventType = 3
 // disk (append-only); only the live index (current truth) shrinks.
 const EventForget sentry.EventType = 4
 
+// EventRecall journals a recall query and its hits — observability only (never
+// replayed by New; it is telemetry, not state).
+const EventRecall sentry.EventType = 6
+
+// RecallHit is one returned memory id + its squared-L2 distance to the query.
+type RecallHit struct {
+	ID   uint64  `json:"id"`
+	Dist float32 `json:"dist"`
+}
+
+// RecallPayload is the persisted form of a recall: the query, k, and the hits.
+type RecallPayload struct {
+	Query string      `json:"q"`
+	K     int         `json:"k"`
+	Hits  []RecallHit `json:"hits"`
+}
+
 // ForgetPayload is the persisted form of a forget tombstone.
 type ForgetPayload struct {
 	ID uint64 `json:"id"`

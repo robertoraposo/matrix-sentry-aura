@@ -601,6 +601,24 @@ func TestListReturnsTenantEntriesWithVectors(t *testing.T) {
 	}
 }
 
+func TestRecallPayloadRoundTrip(t *testing.T) {
+	p := RecallPayload{Query: "deploy oauth", K: 5, Hits: []RecallHit{{ID: 7, Dist: 1.1}, {ID: 9, Dist: 1.4}}}
+	b, err := sentry.MarshalPayload(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got RecallPayload
+	if err := sentry.UnmarshalPayload(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Query != "deploy oauth" || got.K != 5 || len(got.Hits) != 2 || got.Hits[0].ID != 7 || got.Hits[1].Dist != 1.4 {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+	if EventRecall == EventMemory || EventRecall == EventForget {
+		t.Fatal("EventRecall must be a distinct event type")
+	}
+}
+
 // TestRecallGapTruncatesPadding verifies that RecallGap truncates results at the
 // first relevance cliff. Using geoEmbedder:
 //
