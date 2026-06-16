@@ -542,7 +542,13 @@ From a live-corpus effectiveness analysis (tenant 1, 227 mems, 28k events, LIFT 
 - **Recall gap-truncation** (`memory.Store.RecallGap`, env `SENTRY_RECALL_GAP` default 1.25): `Recall` truncates
   at the first relevance cliff (`dist[i] > dist[i-1]·gap`), always keeps ≥1, k stays the cap. Ratio-based →
   embedder-agnostic (nomic-768 + mistral-1024). `0` disables (plain top-k). Verified: the dedup-τ probe now
-  returns 1 hit (was 4 — the 1.42+ padding trimmed). Follow-up: calibrate the 1.25 default over a query set.
+  returns 1 hit (was 4 — the 1.42+ padding trimmed).
+- **Gap default CALIBRATED 1.25 → 1.20** (2026-06-16, `results/recall-gap-calibration.md`): swept over 20 real
+  queries embedded with the production Ollama, hand-labeled; F1 peaks flat at 1.15–1.20 and **1.20 dominates
+  1.25** (same recall 0.89 + same relevant-loss 3/18, higher precision 0.57 vs 0.52). Truncation lifts
+  precision 0.36→0.57 for a small recall cost. Deployed 8808+8809. Honest finding: ~5/20 queries are
+  ranking/coverage misses the gap can't fix (relevant memory buried or absent) — that (recall relevance +
+  coverage, the #4 loop) is the real frontier, not the gap value.
 
 ## Field status (2026-06-15)
 
