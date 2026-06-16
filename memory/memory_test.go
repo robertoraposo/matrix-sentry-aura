@@ -225,19 +225,20 @@ func TestRememberStoresNormalizedTags(t *testing.T) {
 }
 
 func TestRebuildNormalizesExistingTags(t *testing.T) {
+	// The old test wrote via Remember, which already normalizes — making it vacuous.
+	// This version injects a raw EventMemory with an UPPERCASE tag directly into
+	// the journal (bypassing Remember), so only New's rebuild path can normalize it.
 	emb := geoEmbedder()
-	dir := t.TempDir()
-	j, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, err := New(j, emb)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.Remember(1, "beta", RememberOpts{Tags: []string{"ASHLEY"}})
-	j.Close()
+	st, dir := newTestStore(t, emb)
 
+	// Inject an uppercase tag straight into the journal, bypassing Remember.
+	raw := MemoryPayload{ID: 1, Text: "beta", Vector: []float32{0.1, 0}, Tags: []string{"ASHLEY"}}
+	if _, err := st.journal.Append(sentry.TenantID(1), EventMemory, raw); err != nil {
+		t.Fatal(err)
+	}
+	st.journal.Close()
+
+	// Reopen and rebuild — New must lowercase the persisted "ASHLEY".
 	jr, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
 	if err != nil {
 		t.Fatal(err)
@@ -248,8 +249,8 @@ func TestRebuildNormalizesExistingTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := re.List(1)
-	if len(got) == 0 || len(got[0].Tags) == 0 || got[0].Tags[0] != "ashley" {
-		t.Fatalf("rebuild did not normalize tags: %+v", got)
+	if len(got) != 1 || len(got[0].Tags) != 1 || got[0].Tags[0] != "ashley" {
+		t.Fatalf("rebuild did not normalize on-disk uppercase tag: %+v", got)
 	}
 }
 
