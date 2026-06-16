@@ -83,6 +83,11 @@ type Store struct {
 	// (distance < threshold; the boundary point is treated as novel), Remember
 	// treats it as a duplicate and does not persist it. 0 disables dedup.
 	DedupThreshold float32
+	// RecallGap, when > 1, truncates Recall results at the first relevance cliff:
+	// the first position whose distance exceeds the previous one's by this ratio.
+	// The top hit is always kept. 0/≤1 disables (plain top-k). Ratio-based so it
+	// is embedder-agnostic (works for any vector dimension/scale).
+	RecallGap float32
 }
 
 // New wraps a journal with semantic memory, rebuilding the in-RAM index from
@@ -315,6 +320,14 @@ func (s *Store) Recall(tenant sentry.TenantID, query string, k int) ([]Memory, e
 	})
 	if len(scored) > k {
 		scored = scored[:k]
+	}
+	if s.RecallGap > 1 && len(scored) > 1 {
+		for i := 1; i < len(scored); i++ {
+			if scored[i].Score > scored[i-1].Score*s.RecallGap {
+				scored = scored[:i]
+				break
+			}
+		}
 	}
 	return scored, nil
 }

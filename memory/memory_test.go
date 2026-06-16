@@ -600,3 +600,60 @@ func TestListReturnsTenantEntriesWithVectors(t *testing.T) {
 		}
 	}
 }
+
+// TestRecallGapTruncatesPadding verifies that RecallGap truncates results at the
+// first relevance cliff. Using geoEmbedder:
+//
+//	"cat"    → {0,   0}
+//	"kitten" → {0.1, 0}   (query vector; NOT stored)
+//	"feline" → {0.5, 0}
+//	"rocket" → {10, 10}
+//
+// Squared-L2 distances from query "kitten" ({0.1,0}) to stored entries:
+//
+//	"cat"    → (0.1)²          = 0.01   ← close hit
+//	"feline" → (0.4)²          = 0.16   ← ratio 0.16/0.01 = 16×  > 1.25  → cliff here
+//	"rocket" → (9.9)²+(10)²    = 198.01
+//
+// With RecallGap=1.25 and k=5 the loop stops at i=1 (0.16 > 0.01*1.25),
+// so only "cat" is returned. With RecallGap=0 all three are returned.
+func TestRecallGapTruncatesPadding(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	// Store one near hit and two far entries. "kitten" is the query vector only.
+	for _, txt := range []string{"cat", "feline", "rocket"} {
+		if _, _, _, err := st.Remember(1, txt, RememberOpts{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	query := "kitten" // maps to {0.1,0}; sqL2 to "cat"=0.01, "feline"=0.16 (16× cliff)
+
+	st.RecallGap = 0
+	all, err := st.Recall(1, query, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st.RecallGap = 1.25
+	cut, err := st.Recall(1, query, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cut) < 1 {
+		t.Fatal("must always keep at least the top hit")
+	}
+	if len(cut) > len(all) {
+		t.Fatalf("gap must not increase results: cut=%d all=%d", len(cut), len(all))
+	}
+	if len(all) > 1 && len(cut) >= len(all) {
+		var ds []float32
+		for _, m := range all {
+			ds = append(ds, m.Score)
+		}
+		t.Fatalf("gap=1.25 should truncate padding past the cliff: cut=%d all=%d scores=%v", len(cut), len(all), ds)
+	}
+	// top hit is preserved and is the same as without the gap
+	if cut[0].ID != all[0].ID {
+		t.Fatalf("top hit changed: %d vs %d", cut[0].ID, all[0].ID)
+	}
+}
