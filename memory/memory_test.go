@@ -193,6 +193,66 @@ func TestNewRejectsDimMismatchOnRebuild(t *testing.T) {
 
 var _ = filepath.Join
 
+func TestNormalizeTags(t *testing.T) {
+	got := normalizeTags([]string{"ASHLEY", "ashley", " Ashley ", "", "Bug"})
+	want := []string{"ashley", "bug"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+	if normalizeTags(nil) != nil {
+		t.Fatal("nil tags → nil")
+	}
+}
+
+func TestRememberStoresNormalizedTags(t *testing.T) {
+	st, _ := newTestStore(t, geoEmbedder())
+	id, _, _, err := st.Remember(1, "alpha", RememberOpts{Tags: []string{"ASHLEY", " Bug"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range st.List(1) {
+		if m.ID == id {
+			if len(m.Tags) != 2 || m.Tags[0] != "ashley" || m.Tags[1] != "bug" {
+				t.Fatalf("tags not normalized: %v", m.Tags)
+			}
+		}
+	}
+}
+
+func TestRebuildNormalizesExistingTags(t *testing.T) {
+	emb := geoEmbedder()
+	dir := t.TempDir()
+	j, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := New(j, emb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Remember(1, "beta", RememberOpts{Tags: []string{"ASHLEY"}})
+	j.Close()
+
+	jr, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jr.Close()
+	re, err := New(jr, emb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := re.List(1)
+	if len(got) == 0 || len(got[0].Tags) == 0 || got[0].Tags[0] != "ashley" {
+		t.Fatalf("rebuild did not normalize tags: %+v", got)
+	}
+}
+
 func TestRememberDedupsNearDuplicate(t *testing.T) {
 	st, _ := newTestStore(t, geoEmbedder())
 	st.DedupThreshold = 0.05 // kitten(0.01) < tau < feline(0.25)

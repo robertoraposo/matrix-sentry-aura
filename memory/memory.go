@@ -14,6 +14,7 @@ package memory
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"matrixsentry/sentry"
@@ -102,6 +103,7 @@ func New(journal *sentry.Store, embed Embedder) (*Store, error) {
 			scanErr = fmt.Errorf("memory: persisted vector dim %d != embedder dim %d (id %d)", len(p.Vector), embed.Dim(), p.ID)
 			return false
 		}
+		p.Tags = normalizeTags(p.Tags)
 		s.entries = append(s.entries, entry{tenant: r.Tenant, mem: p})
 		if p.ID >= s.nextID {
 			s.nextID = p.ID + 1
@@ -154,6 +156,29 @@ func (s *Store) dropEntry(tenant sentry.TenantID, id uint64) {
 	}
 }
 
+// normalizeTags lowercases, trims, and de-duplicates tags (order-preserving) so
+// case/whitespace variants ("ASHLEY", " ashley ") collapse to one canonical tag.
+// Returns nil for no usable tags (keeps json omitempty behavior).
+func normalizeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(tags))
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		n := strings.ToLower(strings.TrimSpace(t))
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // RememberOpts carries the optional inputs to Remember. Zero value = a plain
 // store subject to the dedup gate.
 type RememberOpts struct {
@@ -186,8 +211,10 @@ func (s *Store) Remember(tenant sentry.TenantID, text string, opts RememberOpts)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tags := normalizeTags(opts.Tags)
+
 	if opts.Supersedes != 0 && s.hasEntry(tenant, opts.Supersedes) {
-		p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: opts.Tags, Source: opts.Src, Supersedes: opts.Supersedes}
+		p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: tags, Source: opts.Src, Supersedes: opts.Supersedes}
 		if _, err := s.journal.Append(tenant, EventMemory, p); err != nil {
 			return 0, false, 0, fmt.Errorf("memory: append: %w", err)
 		}
@@ -215,7 +242,7 @@ func (s *Store) Remember(tenant sentry.TenantID, text string, opts RememberOpts)
 		}
 	}
 
-	p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: opts.Tags, Source: opts.Src}
+	p := MemoryPayload{ID: s.nextID, Text: text, Vector: v, Tags: tags, Source: opts.Src}
 	if _, err := s.journal.Append(tenant, EventMemory, p); err != nil {
 		return 0, false, 0, fmt.Errorf("memory: append: %w", err)
 	}
