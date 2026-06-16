@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -462,6 +463,11 @@ func toolList() []map[string]any {
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
+			"name":        "analyze_recall",
+			"description": "Measure recall coverage for this tenant: how many recalls have run, the top-hit distance distribution (a high top-distance means recall found nothing relevant — a coverage gap), and the most recent real queries.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
 			"name":        "remember",
 			"description": "Store a durable memory so future sessions (this agent or another model) can recall it semantically. Use for decisions, conventions, gotchas, and context worth surviving a context reset. The text is embedded and indexed; recall finds it by meaning, not keywords.",
 			"inputSchema": map[string]any{
@@ -604,6 +610,51 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		return s.toolText(req.ID, fmt.Sprintf(
 			"access analysis (tenant %d): total=%d  markovHit=%.1f%%  marginalHit=%.1f%%  LIFT=%.1f%%  coverage=%.1f%%\n%s",
 			tenant, rep.Total, rep.MarkovHit*100, rep.MarginalHit*100, rep.Lift*100, rep.Coverage*100, liftVerdict(rep.Lift)))
+	case "analyze_recall":
+		et := memory.EventRecall
+		var tops []float64
+		empty, total := 0, 0
+		var recent []string
+		tnt := tenant
+		s.store.Scan(sentry.Filter{Tenant: &tnt, Type: &et}, func(r sentry.Record) bool {
+			var p memory.RecallPayload
+			if sentry.UnmarshalPayload(r.Payload, &p) != nil {
+				return true
+			}
+			total++
+			if len(p.Hits) == 0 {
+				empty++
+			} else {
+				tops = append(tops, float64(p.Hits[0].Dist))
+			}
+			recent = append(recent, truncRunes(p.Query, 40))
+			return true
+		})
+		if total == 0 {
+			return s.toolText(req.ID, fmt.Sprintf("recall coverage (tenant %d): total=0 — no recalls logged yet", tenant))
+		}
+		sort.Float64s(tops)
+		pct := func(f float64) float64 {
+			if len(tops) == 0 {
+				return 0
+			}
+			i := int(f * float64(len(tops)))
+			if i >= len(tops) {
+				i = len(tops) - 1
+			}
+			return tops[i]
+		}
+		maxTop := 0.0
+		if len(tops) > 0 {
+			maxTop = tops[len(tops)-1]
+		}
+		tail := recent
+		if len(tail) > 8 {
+			tail = tail[len(tail)-8:]
+		}
+		return s.toolText(req.ID, fmt.Sprintf(
+			"recall coverage (tenant %d): total=%d empty=%d  topDist min=%.3f p50=%.3f p90=%.3f max=%.3f\nrecent: %q",
+			tenant, total, empty, pct(0), pct(0.5), pct(0.9), maxTop, tail))
 	case "remember":
 		if s.mem == nil {
 			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
