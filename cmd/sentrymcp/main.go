@@ -79,6 +79,7 @@ func main() {
 	embedDim := flag.Int("embed-dim", 768, "embedding dimension (nomic-embed-text = 768)")
 	embedProvider := flag.String("embed-provider", envOr("SENTRY_EMBED_PROVIDER", "ollama"), "embedding provider: ollama | mistral")
 	dedupTau := flag.Float64("dedup-tau", envFloat("SENTRY_DEDUP_TAU", 0), "squared-L2 dedup radius for remember (0 = off); set from Phase-0 calibration")
+	recallGap := flag.Float64("recall-gap", envFloat("SENTRY_RECALL_GAP", 1.25), "truncate recall at the first distance cliff of this ratio (0 = off, plain top-k)")
 	flag.Parse()
 
 	store, err := sentry.Open(*dir, sentry.Options{FsyncEvery: 75 * time.Millisecond})
@@ -140,6 +141,7 @@ func main() {
 		}
 		s.mem = mem
 		s.mem.DedupThreshold = float32(*dedupTau)
+		s.mem.RecallGap = float32(*recallGap)
 		moko.Info("semantic memory enabled", map[string]string{"provider": *embedProvider, "model": model, "dim": fmt.Sprint(dim)})
 	}
 
