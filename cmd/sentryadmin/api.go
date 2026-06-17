@@ -3,10 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -200,10 +200,7 @@ func buildComms(msgs []commsMsg) []byte {
 }
 
 func unescapeHTML(s string) string {
-	s = strings.ReplaceAll(s, "&gt;", ">")
-	s = strings.ReplaceAll(s, "&lt;", "<")
-	s = strings.ReplaceAll(s, "&amp;", "&")
-	return s
+	return html.UnescapeString(s) // covers &gt; &lt; &amp; &#39; &quot; + numeric entities
 }
 
 // handleJournal proxies the tenant's recent semantic journal events from the
