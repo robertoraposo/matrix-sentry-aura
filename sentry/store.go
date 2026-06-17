@@ -301,6 +301,31 @@ func (s *Store) Scan(filter Filter, fn func(Record) bool) error {
 	return nil
 }
 
+// ScanReverse visits records newest-first (seq n→1), applying the same tenant/type
+// filter as Scan. fn returns false to stop early — letting recency queries read
+// only the journal tail instead of the whole log.
+func (s *Store) ScanReverse(filter Filter, fn func(Record) bool) error {
+	s.mu.RLock()
+	n := len(s.keydir)
+	s.mu.RUnlock()
+	for i := n; i >= 1; i-- {
+		rec, err := s.Read(Seq(i))
+		if err != nil {
+			return err
+		}
+		if filter.Tenant != nil && rec.Tenant != *filter.Tenant {
+			continue
+		}
+		if filter.Type != nil && rec.Type != *filter.Type {
+			continue
+		}
+		if !fn(rec) {
+			break
+		}
+	}
+	return nil
+}
+
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

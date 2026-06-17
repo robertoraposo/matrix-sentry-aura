@@ -65,6 +65,35 @@ func TestStoreIsolation(t *testing.T) {
 	}
 }
 
+func TestScanReverseNewestFirstAndStops(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sentry")
+	st, err := Open(dir, Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for i := 0; i < 5; i++ {
+		if _, err := st.Append(1, EventAccess, AccessPayload{ItemID: uint64(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seqs []Seq
+	st.ScanReverse(Filter{}, func(r Record) bool { seqs = append(seqs, r.Seq); return true })
+	if len(seqs) != 5 || seqs[0] != 5 || seqs[4] != 1 {
+		t.Fatalf("want 5..1 newest-first, got %v", seqs)
+	}
+	calls := 0
+	var got []Seq
+	st.ScanReverse(Filter{}, func(r Record) bool {
+		calls++
+		got = append(got, r.Seq)
+		return len(got) < 2
+	})
+	if len(got) != 2 || got[0] != 5 || calls != 2 {
+		t.Fatalf("early stop failed: got=%v calls=%d", got, calls)
+	}
+}
+
 func TestStoreRecovery(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "sentry")
 	s, err := Open(dir, Options{FsyncEvery: 0})
