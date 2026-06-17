@@ -575,6 +575,18 @@ func toolList() []map[string]any {
 			},
 		},
 		{
+			"name":        "inbox",
+			"description": "Fetch all messages directed at YOU (by target) across every area, in one call — so you never miss a directed message by polling the wrong area. Pass target=<your agent label> and since=<the last # you saw> for only-newer. The response ends with the latest # to use as your next cursor. Reply with post(area=…, kind=\"answer\", ref=<that #>, target=<sender>).",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target": map[string]any{"type": "string", "description": "your agent label — messages whose target is this are returned"},
+					"since":  map[string]any{"type": "integer", "description": "return only messages with # greater than this (default 0 = all)"},
+				},
+				"required": []any{"target"},
+			},
+		},
+		{
 			"name":        "promote",
 			"description": "Promote a channel message to durable semantic memory (remember), e.g. a decision or an answer worth keeping. The message stays in the channel; a memory is also created.",
 			"inputSchema": map[string]any{
@@ -820,6 +832,35 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			return s.toolText(req.ID, fmt.Sprintf("no new messages in %s since #%d", area, since))
 		}
 		fmt.Fprintf(&b, "(cursor: #%d)", last)
+		return s.toolText(req.ID, b.String())
+	case "inbox":
+		target, _ := strArg(p.Args, "target")
+		if target == "" {
+			return s.toolErr(req.ID, "provide 'target' (your agent label) to read your inbox")
+		}
+		var inboxSince uint64
+		if v, ok := numArg(p.Args, "since"); ok && v > 0 {
+			inboxSince = uint64(v)
+		}
+		msgs := s.chat.Inbox(tenant, target, inboxSince)
+		var b strings.Builder
+		if len(msgs) == 0 {
+			fmt.Fprintf(&b, "inbox empty for %q (since #%d)", target, inboxSince)
+		} else {
+			fmt.Fprintf(&b, "%d message(s) for %q:\n", len(msgs), target)
+			cursor := inboxSince
+			for _, m := range msgs {
+				tgt := m.Target
+				if tgt == "" {
+					tgt = "all"
+				}
+				fmt.Fprintf(&b, "#%d [%s] %s→%s @%s: %s\n", m.Seq, m.Kind, m.From, tgt, m.Area, m.Text)
+				if m.Seq > cursor {
+					cursor = m.Seq
+				}
+			}
+			fmt.Fprintf(&b, "(cursor: #%d)", cursor)
+		}
 		return s.toolText(req.ID, b.String())
 	case "promote":
 		if s.mem == nil {

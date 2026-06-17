@@ -565,6 +565,25 @@ func TestAnalyzeRecallReportsCoverage(t *testing.T) {
 	}
 }
 
+func TestInboxToolReturnsDirectedMessages(t *testing.T) {
+	s := newMemServer(t)
+	if s.chat == nil {
+		s.chat, _ = comms.New(s.store)
+	}
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch1", From: "alice", Text: "ping", Target: "08", Kind: "question"})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch2", From: "bob", Text: "fyi", Target: "08", Kind: "info"})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch1", From: "alice", Text: "not for 08", Target: "09"})
+
+	resp := callNamed(s, "inbox", map[string]any{"target": "08"})
+	text := respText(t, resp)
+	if !strings.Contains(text, "ping") || !strings.Contains(text, "fyi") {
+		t.Fatalf("inbox should return both messages directed at 08, got: %s", text)
+	}
+	if strings.Contains(text, "not for 08") {
+		t.Fatalf("inbox leaked a message directed at 09: %s", text)
+	}
+}
+
 func TestAdminCommsReturnsTenantMessages(t *testing.T) {
 	s := newMemServer(t)
 	if s.chat == nil {
