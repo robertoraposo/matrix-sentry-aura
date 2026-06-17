@@ -38,6 +38,17 @@ import (
 
 const protocolVersion = "2024-11-05"
 
+// recallEntry is one entry in the in-RAM recall ring used by analyze_recall.
+// The ring holds recent-since-process-start recall events; recalls before a
+// restart are not counted (acceptable for a recency coverage metric — the
+// durable record is still in the journal as EventRecall).
+type recallEntry struct {
+	tenant sentry.TenantID
+	p      memory.RecallPayload
+}
+
+const recallRingCap = 500
+
 type rpcReq struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"` // absent for notifications
@@ -69,6 +80,9 @@ type server struct {
 	token     string         // optional bearer auth for HTTP transport
 	tokens    *tokenRegistry // secret→tenant; owner built-in, teams from SENTRY_TOKENS_FILE
 	logRecall bool           // journal recall queries as EventRecall (SENTRY_RECALL_LOG)
+
+	recallMu   sync.Mutex   // guards recallRing
+	recallRing []recallEntry // bounded ring of recent recalls for analyze_recall — O(≤cap), no journal scan
 }
 
 func main() {
@@ -663,17 +677,26 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			"access analysis (tenant %d): total=%d  markovHit=%.1f%%  marginalHit=%.1f%%  LIFT=%.1f%%  coverage=%.1f%%\n%s",
 			tenant, rep.Total, rep.MarkovHit*100, rep.MarginalHit*100, rep.Lift*100, rep.Coverage*100, liftVerdict(rep.Lift)))
 	case "analyze_recall":
-		const recallWindow = 500
-		et := memory.EventRecall
+		// Read the in-RAM ring (O(≤recallRingCap)) instead of scanning the
+		// journal.  EventRecall is sparse (~116 in a 31k-event journal), so
+		// ScanReverse never hit the match cap and scanned everything (~350ms,
+		// growing with the journal).  The ring holds recent-since-process-start
+		// recalls; historical ones before a restart are not counted — acceptable
+		// for a recency coverage metric; the durable record is in the journal.
+		s.recallMu.Lock()
+		var rps []memory.RecallPayload
+		for _, e := range s.recallRing {
+			if e.tenant == tenant {
+				rps = append(rps, e.p)
+			}
+		}
+		s.recallMu.Unlock()
 		var tops []float64
 		empty, total := 0, 0
 		var recent []string
-		tnt := tenant
-		s.store.ScanReverse(sentry.Filter{Tenant: &tnt, Type: &et}, func(r sentry.Record) bool {
-			var p memory.RecallPayload
-			if sentry.UnmarshalPayload(r.Payload, &p) != nil {
-				return true
-			}
+		// Walk newest-first for the "recent" display.
+		for i := len(rps) - 1; i >= 0; i-- {
+			p := rps[i]
 			total++
 			if len(p.Hits) == 0 {
 				empty++
@@ -683,8 +706,7 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			if len(recent) < 8 {
 				recent = append(recent, truncRunes(p.Query, 40))
 			}
-			return total < recallWindow
-		})
+		}
 		if total == 0 {
 			return s.toolText(req.ID, fmt.Sprintf("recall coverage (tenant %d): total=0 — no recalls logged yet", tenant))
 		}
@@ -759,6 +781,12 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			if _, aerr := s.store.Append(tenant, memory.EventRecall, rp); aerr != nil {
 				s.moko.Info("recall-log failed", map[string]string{"tenant": fmt.Sprint(tenant), "err": aerr.Error()})
 			}
+			s.recallMu.Lock()
+			s.recallRing = append(s.recallRing, recallEntry{tenant: tenant, p: rp})
+			if len(s.recallRing) > recallRingCap {
+				s.recallRing = s.recallRing[len(s.recallRing)-recallRingCap:]
+			}
+			s.recallMu.Unlock()
 		}
 		s.moko.Info("recall", map[string]string{"tenant": fmt.Sprint(tenant), "k": fmt.Sprint(k), "hits": fmt.Sprint(len(hits))})
 		return s.toolText(req.ID, formatRecall(query, hits))

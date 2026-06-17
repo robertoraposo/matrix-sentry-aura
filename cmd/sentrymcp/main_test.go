@@ -584,6 +584,23 @@ func TestInboxToolReturnsDirectedMessages(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRecallUsesRing(t *testing.T) {
+	s := newMemServer(t)
+	s.logRecall = true
+	s.mem.Remember(s.tenant, "deploy on fridays", memory.RememberOpts{})
+	for _, q := range []string{"deploy on fridays", "zzz unrelated"} {
+		callNamed(s, "recall", map[string]any{"query": q, "k": float64(3)})
+	}
+	resp := callNamed(s, "analyze_recall", map[string]any{})
+	text := respText(t, resp)
+	if !strings.Contains(text, "total=2") {
+		t.Fatalf("analyze_recall should report total=2 from the ring, got: %s", text)
+	}
+	if !strings.Contains(text, "deploy on fridays") {
+		t.Fatalf("should echo a recent query, got: %s", text)
+	}
+}
+
 func TestAdminCommsReturnsTenantMessages(t *testing.T) {
 	s := newMemServer(t)
 	if s.chat == nil {
