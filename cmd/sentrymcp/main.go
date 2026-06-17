@@ -304,7 +304,7 @@ func (s *server) handleAdminJournal(w http.ResponseWriter, r *http.Request) {
 	}
 	events := make([]ev, 0, limit)
 	t := tenant
-	s.store.Scan(sentry.Filter{Tenant: &t}, func(rec sentry.Record) bool {
+	s.store.ScanReverse(sentry.Filter{Tenant: &t}, func(rec sentry.Record) bool {
 		var e ev
 		e.Seq = uint64(rec.Seq)
 		e.TS = rec.Tstamp / 1e6
@@ -338,11 +338,12 @@ func (s *server) handleAdminJournal(w http.ResponseWriter, r *http.Request) {
 			return true
 		}
 		events = append(events, e)
-		if len(events) > limit {
-			events = events[len(events)-limit:]
-		}
-		return true
+		return len(events) < limit
 	})
+	// ScanReverse yielded newest-first; reverse to chronological for display
+	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
+		events[i], events[j] = events[j], events[i]
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct {
 		Events []ev `json:"events"`
@@ -376,20 +377,11 @@ func (s *server) handleAdminComms(w http.ResponseWriter, r *http.Request) {
 		Target string `json:"target,omitempty"`
 		Ref    uint64 `json:"ref,omitempty"`
 	}
-	msgs := make([]msg, 0, limit)
-	t := tenant
-	et := comms.EventMessage
-	s.store.Scan(sentry.Filter{Tenant: &t, Type: &et}, func(rec sentry.Record) bool {
-		var p comms.MessagePayload
-		if sentry.UnmarshalPayload(rec.Payload, &p) != nil {
-			return true
-		}
-		msgs = append(msgs, msg{Seq: uint64(rec.Seq), TS: rec.Tstamp / 1e6, Area: p.Area, From: p.From, Kind: p.Kind, Text: p.Text, Target: p.Target, Ref: p.Ref})
-		if len(msgs) > limit {
-			msgs = msgs[len(msgs)-limit:]
-		}
-		return true
-	})
+	recent := s.chat.Recent(tenant, limit)
+	msgs := make([]msg, 0, len(recent))
+	for _, m := range recent {
+		msgs = append(msgs, msg{Seq: m.Seq, TS: m.TS / 1e6, Area: m.Area, From: m.From, Kind: m.Kind, Text: m.Text, Target: m.Target, Ref: m.Ref})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct {
 		Messages []msg `json:"messages"`
@@ -659,12 +651,13 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			"access analysis (tenant %d): total=%d  markovHit=%.1f%%  marginalHit=%.1f%%  LIFT=%.1f%%  coverage=%.1f%%\n%s",
 			tenant, rep.Total, rep.MarkovHit*100, rep.MarginalHit*100, rep.Lift*100, rep.Coverage*100, liftVerdict(rep.Lift)))
 	case "analyze_recall":
+		const recallWindow = 500
 		et := memory.EventRecall
 		var tops []float64
 		empty, total := 0, 0
 		var recent []string
 		tnt := tenant
-		s.store.Scan(sentry.Filter{Tenant: &tnt, Type: &et}, func(r sentry.Record) bool {
+		s.store.ScanReverse(sentry.Filter{Tenant: &tnt, Type: &et}, func(r sentry.Record) bool {
 			var p memory.RecallPayload
 			if sentry.UnmarshalPayload(r.Payload, &p) != nil {
 				return true
@@ -675,8 +668,10 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			} else {
 				tops = append(tops, float64(p.Hits[0].Dist))
 			}
-			recent = append(recent, truncRunes(p.Query, 40))
-			return true
+			if len(recent) < 8 {
+				recent = append(recent, truncRunes(p.Query, 40))
+			}
+			return total < recallWindow
 		})
 		if total == 0 {
 			return s.toolText(req.ID, fmt.Sprintf("recall coverage (tenant %d): total=0 — no recalls logged yet", tenant))
@@ -696,13 +691,9 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		if len(tops) > 0 {
 			maxTop = tops[len(tops)-1]
 		}
-		tail := recent
-		if len(tail) > 8 {
-			tail = tail[len(tail)-8:]
-		}
 		return s.toolText(req.ID, fmt.Sprintf(
 			"recall coverage (tenant %d): total=%d empty=%d  topDist min=%.3f p50=%.3f p90=%.3f max=%.3f\nrecent: %q",
-			tenant, total, empty, pct(0), pct(0.5), pct(0.9), maxTop, tail))
+			tenant, total, empty, pct(0), pct(0.5), pct(0.9), maxTop, recent))
 	case "remember":
 		if s.mem == nil {
 			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
