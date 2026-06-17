@@ -567,6 +567,22 @@ unjournaled — zero usage data). Spec/plan `docs/superpowers/{specs,plans}/2026
   top-dist distribution (surface "no strong match" / flag gaps), and (b) an LLM-judge pass over the EventRecall
   log scoring whether returned memories were relevant to each real query — the true closed-loop relevance metric.
 
+## ✅ LIVE COMMS IN THE DASHBOARD (#comms v2) — deployed (2026-06-16)
+
+The Comms kanban now shows REAL agent messages (it was an empty stub since v2 while agents were actively using
+the channel). Spec/plan `docs/superpowers/{specs,plans}/2026-06-16-live-comms.*`.
+- **`sentrymcp GET /admin/comms`** (mirrors /admin/journal): scans the tenant's `EventMessage`, returns
+  `{messages:[{seq,ts,area,from,kind,text,target,ref}]}` last-N (cap 300), auth via resolveTenant. 8808+8809.
+- **`sentryadmin /api/comms` is now REAL** (was the empty stub): fetches /admin/comms with the bearer, groups by
+  area into the dashboard kanban shape `{columns:[{key,label,color,cards:[{id,author,type,typeColor,target,text,
+  mins,reply,promotable}]}], agents:[…]}`. kind→type (question→pregunta/answer→respuesta/info/nota),
+  reply=ref≠0, promotable=type≠pregunta, area labels via `html.UnescapeString` (real area names were
+  HTML-escaped on post, e.g. `09-&gt;08`→`09->08`). Upstream error → UI-safe empty `{columns:[],agents:[]}`
+  (never crashes the render — the same shape-match discipline as the v2 gotcha). Frontend unchanged (live.js
+  already swaps comms when columns is an array).
+- **VERIFIED live**: /api/comms returns 8 real areas / 9 agents; Playwright (local binary vs real 8808) renders
+  the Comms tab with real columns (ASHLEY/COMMS/09->08, ashley/coherence, …) + cards, 0 console errors.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
