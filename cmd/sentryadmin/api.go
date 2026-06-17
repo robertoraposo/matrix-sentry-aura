@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -83,13 +84,126 @@ func (a *apiServer) handleGalaxy(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out)
 }
 
-// handleComms returns empty live comms for now (real wiring is a follow-up).
-// The shape MUST match the mock's comms() return ({columns, agents}) so the
-// dashboard's render (st.comms.columns.map / st.comms.agents.length) doesn't
-// crash; empty arrays render an empty kanban honestly.
+type commsMsg struct {
+	Seq    uint64 `json:"seq"`
+	Area   string `json:"area"`
+	From   string `json:"from"`
+	Kind   string `json:"kind"`
+	Text   string `json:"text"`
+	Target string `json:"target"`
+	Ref    uint64 `json:"ref"`
+	TS     int64  `json:"ts"`
+}
+
+var emptyComms = []byte(`{"columns":[],"agents":[]}`)
+
 func (a *apiServer) handleComms(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"columns":[],"agents":[]}`))
+	req, err := http.NewRequest(http.MethodGet, a.mcpURL+"/admin/comms", nil)
+	if err != nil {
+		w.Write(emptyComms)
+		return
+	}
+	if a.token != "" {
+		req.Header.Set("Authorization", "Bearer "+a.token)
+	}
+	resp, err := a.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		w.Write(emptyComms)
+		return
+	}
+	defer resp.Body.Close()
+	var in struct {
+		Messages []commsMsg `json:"messages"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&in) != nil {
+		w.Write(emptyComms)
+		return
+	}
+	w.Write(buildComms(in.Messages))
+}
+
+type commsCard struct {
+	ID        uint64 `json:"id"`
+	Author    string `json:"author"`
+	Type      string `json:"type"`
+	TypeColor string `json:"typeColor"`
+	Target    string `json:"target"`
+	Text      string `json:"text"`
+	Mins      int    `json:"mins"`
+	Reply     bool   `json:"reply"`
+	Promotable bool  `json:"promotable"`
+}
+type commsColumn struct {
+	Key   string      `json:"key"`
+	Label string      `json:"label"`
+	Color string      `json:"color"`
+	Cards []commsCard `json:"cards"`
+}
+
+func buildComms(msgs []commsMsg) []byte {
+	typeColor := map[string]string{"pregunta": "#35E6FF", "respuesta": "#34E5A0", "info": "#9B6CFF", "nota": "#7C8AA5"}
+	kindToType := func(k string) string {
+		switch k {
+		case "question":
+			return "pregunta"
+		case "answer":
+			return "respuesta"
+		case "info":
+			return "info"
+		default:
+			return "nota"
+		}
+	}
+	now := time.Now().UnixMilli()
+	order := []string{}
+	cols := map[string]*commsColumn{}
+	agentsSeen := map[string]bool{}
+	agents := []string{}
+	for _, m := range msgs {
+		area := unescapeHTML(m.Area)
+		col, ok := cols[area]
+		if !ok {
+			col = &commsColumn{Key: fmt.Sprintf("a%d", len(order)), Label: area, Color: palette[len(order)%len(palette)]}
+			cols[area] = col
+			order = append(order, area)
+		}
+		typ := kindToType(m.Kind)
+		mins := int((now - m.TS) / 60000)
+		if mins < 0 {
+			mins = 0
+		}
+		col.Cards = append(col.Cards, commsCard{
+			ID: m.Seq, Author: m.From, Type: typ, TypeColor: typeColor[typ], Target: m.Target,
+			Text: m.Text, Mins: mins, Reply: m.Ref != 0, Promotable: typ != "pregunta",
+		})
+		if m.From != "" && !agentsSeen[m.From] {
+			agentsSeen[m.From] = true
+			agents = append(agents, m.From)
+		}
+	}
+	out := struct {
+		Columns []commsColumn `json:"columns"`
+		Agents  []string      `json:"agents"`
+	}{Columns: make([]commsColumn, 0, len(order)), Agents: agents}
+	for _, area := range order {
+		out.Columns = append(out.Columns, *cols[area])
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return emptyComms
+	}
+	return b
+}
+
+func unescapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	return s
 }
 
 // handleJournal proxies the tenant's recent semantic journal events from the

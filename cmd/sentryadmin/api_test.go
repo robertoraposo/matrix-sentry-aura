@@ -144,3 +144,53 @@ func TestAPIJournalUpstreamErrorIs502(t *testing.T) {
 		t.Fatalf("want 502, got %d", rec.Code)
 	}
 }
+
+func TestAPICommsGroupsByArea(t *testing.T) {
+	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/admin/comms" { http.NotFound(w, r); return }
+		w.Write([]byte(`{"messages":[
+		  {"seq":1,"ts":1,"area":"ASHLEY/COMMS/09-&gt;08","from":"09-voice","kind":"question","text":"q?","ref":0},
+		  {"seq":2,"ts":1,"area":"ASHLEY/COMMS/09-&gt;08","from":"08","kind":"answer","text":"a","ref":1},
+		  {"seq":3,"ts":1,"area":"ashley/coherence","from":"08","kind":"info","text":"i"}
+		]}`))
+	}))
+	defer mcp.Close()
+	srv := &apiServer{mcpURL: mcp.URL, token: "x", client: http.DefaultClient}
+	rec := httptest.NewRecorder()
+	srv.handleComms(rec, httptest.NewRequest(http.MethodGet, "/api/comms?tenant=personal", nil))
+	if rec.Code != http.StatusOK { t.Fatalf("want 200, got %d", rec.Code) }
+	var d struct {
+		Columns []struct {
+			Label string `json:"label"`
+			Cards []struct {
+				Author, Type, TypeColor, Text string
+				Promotable bool `json:"promotable"`
+				Reply      bool `json:"reply"`
+			} `json:"cards"`
+		} `json:"columns"`
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil { t.Fatal(err) }
+	if len(d.Columns) != 2 { t.Fatalf("want 2 area columns, got %d", len(d.Columns)) }
+	foundUnescaped := false
+	for _, c := range d.Columns {
+		if c.Label == "ASHLEY/COMMS/09->08" {
+			foundUnescaped = true
+			if len(c.Cards) != 2 { t.Fatalf("that area should have 2 cards, got %d", len(c.Cards)) }
+			if c.Cards[0].Type != "pregunta" || c.Cards[0].Promotable { t.Fatalf("question card mapping wrong: %+v", c.Cards[0]) }
+			if c.Cards[1].Type != "respuesta" || !c.Cards[1].Reply { t.Fatalf("answer card mapping wrong: %+v", c.Cards[1]) }
+		}
+	}
+	if !foundUnescaped { t.Fatal("area label was not HTML-unescaped") }
+	if len(d.Agents) != 2 { t.Fatalf("want 2 distinct agents, got %d: %v", len(d.Agents), d.Agents) }
+}
+
+func TestAPICommsUpstreamErrorFallsBackEmpty(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer bad.Close()
+	srv := &apiServer{mcpURL: bad.URL, token: "x", client: http.DefaultClient}
+	rec := httptest.NewRecorder()
+	srv.handleComms(rec, httptest.NewRequest(http.MethodGet, "/api/comms?tenant=personal", nil))
+	if rec.Code != http.StatusOK { t.Fatalf("UI-safe fallback should still be 200, got %d", rec.Code) }
+	if !strings.Contains(rec.Body.String(), `"columns":[]`) { t.Fatalf("expected empty fallback, got %s", rec.Body.String()) }
+}
