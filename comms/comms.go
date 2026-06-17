@@ -109,6 +109,38 @@ func (s *Store) Read(tenant sentry.TenantID, area string, since uint64) []Messag
 	return out
 }
 
+// Inbox returns messages directed at target (Target==target) across ALL areas
+// for tenant, with Seq > since, in seq order. Lets an agent fetch everything
+// addressed to it in one call instead of guessing areas. In-RAM; no journal scan.
+func (s *Store) Inbox(tenant sentry.TenantID, target string, since uint64) []Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Message
+	for _, m := range s.entries {
+		if m.Tenant == tenant && m.Target == target && m.Seq > since {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// Recent returns the last `limit` messages for tenant across all areas, in seq
+// order (oldest→newest). In-RAM; serves the dashboard without a journal scan.
+func (s *Store) Recent(tenant sentry.TenantID, limit int) []Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Message
+	for _, m := range s.entries {
+		if m.Tenant == tenant {
+			out = append(out, m)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
+
 // Get returns the message at seq in area for tenant.
 func (s *Store) Get(tenant sentry.TenantID, area string, seq uint64) (Message, bool) {
 	s.mu.Lock()

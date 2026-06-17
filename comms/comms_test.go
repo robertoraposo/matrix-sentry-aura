@@ -129,3 +129,40 @@ func TestSurvivesReopen(t *testing.T) {
 		t.Fatalf("after reopen read = %+v", got)
 	}
 }
+
+func TestInboxFiltersByTarget(t *testing.T) {
+	st, _ := newTestStore(t)
+	st.Post(1, MessagePayload{Area: "x", From: "a", Text: "for me", Target: "me"})
+	st.Post(1, MessagePayload{Area: "y", From: "b", Text: "also for me", Target: "me"})
+	st.Post(1, MessagePayload{Area: "x", From: "a", Text: "for other", Target: "other"})
+	st.Post(2, MessagePayload{Area: "x", From: "z", Text: "other tenant", Target: "me"})
+
+	in := st.Inbox(1, "me", 0)
+	if len(in) != 2 {
+		t.Fatalf("want 2 inbox msgs across areas, got %d", len(in))
+	}
+	in2 := st.Inbox(1, "me", in[0].Seq)
+	if len(in2) != 1 {
+		t.Fatalf("since should return only newer, got %d", len(in2))
+	}
+}
+
+func TestRecentReturnsLastN(t *testing.T) {
+	st, _ := newTestStore(t)
+	for i := 0; i < 5; i++ {
+		st.Post(1, MessagePayload{Area: "x", From: "a", Text: "m"})
+	}
+	st.Post(2, MessagePayload{Area: "x", From: "z", Text: "other tenant"})
+	got := st.Recent(1, 3)
+	if len(got) != 3 {
+		t.Fatalf("want last 3, got %d", len(got))
+	}
+	if !(got[0].Seq < got[1].Seq && got[1].Seq < got[2].Seq) {
+		t.Fatalf("Recent should be seq-ascending: %+v", got)
+	}
+	for _, m := range got {
+		if m.Tenant != 1 {
+			t.Fatal("Recent leaked another tenant")
+		}
+	}
+}
