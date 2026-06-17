@@ -564,3 +564,39 @@ func TestAnalyzeRecallReportsCoverage(t *testing.T) {
 		t.Fatalf("analyze_recall should echo a recent query, got: %s", text)
 	}
 }
+
+func TestAdminCommsReturnsTenantMessages(t *testing.T) {
+	s := newMemServer(t)
+	if s.chat == nil {
+		s.chat, _ = comms.New(s.store)
+	}
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "X", From: "a1", Kind: "question", Text: "hola?"})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "X", From: "a2", Kind: "answer", Text: "sí", Ref: 1})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "Y", From: "a1", Kind: "info", Text: "fyi"})
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/comms", nil)
+	rec := httptest.NewRecorder()
+	s.handleAdminComms(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Messages []struct {
+			Seq  uint64 `json:"seq"`
+			Area string `json:"area"`
+			From string `json:"from"`
+			Kind string `json:"kind"`
+			Text string `json:"text"`
+			Ref  uint64 `json:"ref"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 3 {
+		t.Fatalf("want 3 messages, got %d", len(out.Messages))
+	}
+	if out.Messages[0].Area != "X" || out.Messages[0].From != "a1" || out.Messages[0].Kind != "question" {
+		t.Fatalf("first message wrong: %+v", out.Messages[0])
+	}
+}

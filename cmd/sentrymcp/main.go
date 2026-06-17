@@ -209,6 +209,7 @@ func (s *server) serveHTTP(addr string) {
 	}
 	mux.HandleFunc("/admin/corpus", s.handleAdminCorpus)
 	mux.HandleFunc("/admin/journal", s.handleAdminJournal)
+	mux.HandleFunc("/admin/comms", s.handleAdminComms)
 	mux.HandleFunc("/", s.handleHTTP)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "sentrymcp http: %v\n", err)
@@ -346,6 +347,53 @@ func (s *server) handleAdminJournal(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(struct {
 		Events []ev `json:"events"`
 	}{Events: events})
+}
+
+// handleAdminComms serves a tenant's recent channel messages (EventMessage) for
+// the dashboard's comms kanban. Auth + tenant via resolveTenant. Server-to-server.
+func (s *server) handleAdminComms(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := s.resolveTenant(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	limit := 100
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 {
+			limit = v
+		}
+	}
+	if limit > 300 {
+		limit = 300
+	}
+	type msg struct {
+		Seq    uint64 `json:"seq"`
+		TS     int64  `json:"ts"`
+		Area   string `json:"area"`
+		From   string `json:"from"`
+		Kind   string `json:"kind"`
+		Text   string `json:"text"`
+		Target string `json:"target,omitempty"`
+		Ref    uint64 `json:"ref,omitempty"`
+	}
+	msgs := make([]msg, 0, limit)
+	t := tenant
+	et := comms.EventMessage
+	s.store.Scan(sentry.Filter{Tenant: &t, Type: &et}, func(rec sentry.Record) bool {
+		var p comms.MessagePayload
+		if sentry.UnmarshalPayload(rec.Payload, &p) != nil {
+			return true
+		}
+		msgs = append(msgs, msg{Seq: uint64(rec.Seq), TS: rec.Tstamp / 1e6, Area: p.Area, From: p.From, Kind: p.Kind, Text: p.Text, Target: p.Target, Ref: p.Ref})
+		if len(msgs) > limit {
+			msgs = msgs[len(msgs)-limit:]
+		}
+		return true
+	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(struct {
+		Messages []msg `json:"messages"`
+	}{Messages: msgs})
 }
 
 // truncRunes shortens s to n runes, appending an ellipsis when cut.
