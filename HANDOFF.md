@@ -583,6 +583,27 @@ the channel). Spec/plan `docs/superpowers/{specs,plans}/2026-06-16-live-comms.*`
 - **VERIFIED live**: /api/comms returns 8 real areas / 9 agents; Playwright (local binary vs real 8808) renders
   the Comms tab with real columns (ASHLEY/COMMS/09->08, ashley/coherence, …) + cards, 0 console errors.
 
+## ✅ AGENT INBOX + BOUNDED ADMIN SCANS (2026-06-16)
+
+Two fixes: agents stop missing directed messages, and the admin/analytics endpoints stop re-reading the whole
+journal. Spec/plan `docs/superpowers/{specs,plans}/2026-06-16-inbox-and-bounded-scans.*`.
+- **`inbox` MCP tool** + **`comms.Store.Inbox(tenant,target,since)`** (in-RAM, cross-area, Target-filtered):
+  an agent fetches everything addressed to it in one call (no guessing areas). Verified live: returns real
+  directed messages (e.g. `04-language→08-architecture`). Convention in the tool description: poll your inbox
+  with your label; reply with `post(kind="answer", ref=<#>, target=<sender>)`.
+- **Perf #3 — bounded scans**: added **`sentry.Store.ScanReverse`** (newest-first, early-stop). Rewired:
+  `/admin/journal` → ScanReverse stop-at-limit (350ms→**18ms**); `/admin/comms` → `comms.Store.Recent` in-RAM
+  (→**0.7ms**); `analyze_recall` → an **in-RAM recall ring** (`server.recallRing`, cap 500, appended on each
+  logged recall) because EventRecall is SPARSE (116 in 31k) so a match-capped scan still read the whole journal
+  (→**0.4ms**, was 350ms). GOTCHA learned: capping a reverse-scan by MATCHES doesn't bound work for a sparse
+  event type — bound by an in-RAM index (or records-visited) instead. `analyze_access` stays a deliberate full
+  scan (its Markov needs every access event; occasional, not hot). The recall ring is recent-since-process-start
+  (durable history remains as EventRecall in the journal).
+- Deployed 8808+8809; all existing endpoint tests green; review found zero issues.
+- DEFERRED (paused): the comms "wake on reply" (`sentry-comms` Stop hook + /loop Monitor) — spec/plan exist at
+  `docs/superpowers/{specs,plans}/2026-06-16-{tag-normalize…,live-comms,recall-observability}` siblings; the
+  inbox tool shipped is the piece that stops messages being lost.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
