@@ -19,3 +19,7 @@
 # OS / editor
 .DS_Store
 *.swp
+
+# build artifacts (compiled locally / shipped to servers)
+/sentryadmin
+/sentrymcp
