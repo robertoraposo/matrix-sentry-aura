@@ -604,6 +604,31 @@ journal. Spec/plan `docs/superpowers/{specs,plans}/2026-06-16-inbox-and-bounded-
   `docs/superpowers/{specs,plans}/2026-06-16-{tag-normalize…,live-comms,recall-observability}` siblings; the
   inbox tool shipped is the piece that stops messages being lost.
 
+## ✅ EMBEDDER MIGRATED to bge-m3 (1024-d) via Ante Crucible — 8808 LIVE (2026-06-21)
+
+The 8808 personal corpus moved from Ollama nomic-768 to **BAAI/bge-m3 (1024-d) served by Ante Crucible**
+(local GPU embed daemon on the ante/ANVIL engine; Ollama-API-compatible). Spec/plan
+`docs/superpowers/{specs,plans}/2026-06-21-reembed-bge-m3.*`. This is "Matrix powered by ANVIL #1" (local embedder).
+- **`cmd/reembed`** (lossless journal rewriter): re-embeds every EventMemory text to the new dim, copies every
+  other record (Access/PathMap/Forget/Message/Recall) VERBATIM in order (seqs + cross-refs preserved), with a
+  verify gate (memory.New at the new dim). Hardened to fail-loud on undecodable records.
+- **Cutover done**: stopped sentrymcp → reembed (47,215 records copied, 869 EventMemory re-embedded, ~1m43s) →
+  swapped journals (old kept as `sentry-journal-768.bak`) → env `SENTRY_OLLAMA_URL`→Crucible endpoint +
+  `SENTRY_EMBED_MODEL=bge-m3` → **systemd ExecStart got `-embed-dim 1024`** → restart.
+- **GOTCHA (caught pre-cutover)**: sentrymcp's `-embed-dim` flag is NOT env-backed (default 768; the 768→1024
+  auto-bump only fires for provider=mistral). So `SENTRY_EMBED_DIM` env is a NO-OP for the ollama provider —
+  the dim MUST be pinned on the ExecStart (`-embed-dim 1024`) or the server starts at 768 and can't open the
+  1024-d journal. (Cleanup candidate: make `-embed-dim` env-backed.)
+- **VERIFIED LIVE**: 781 live memories at dim 1024; recall "cómo se calibró tau" → #65 (exact) dist 0.897;
+  recall latency ~186ms (was ~300ms with Ollama-nomic — bge-m3/ante is faster; still a tailscale hop to the GPU
+  box, so sub-ms would need Crucible co-located with Matrix); comms/journal intact (lossless).
+- **IMPORTANT FOLLOW-UP — re-calibrate for the new space**: `SENTRY_DEDUP_TAU=0.45` and `SENTRY_RECALL_GAP=1.20`
+  were calibrated on the NOMIC-768 distance distribution. bge-m3-1024 is a DIFFERENT space (the dedup-τ probe's
+  top hit is now 0.897 vs ~1.1 before) → both τ and the recall-gap should be re-measured on bge-m3 (same
+  data-driven method: results/tau-recalibration.md + results/recall-gap-calibration.md). Until then they're
+  stale-but-safe-ish; re-calibration is the next correctness step. Rollback available via `sentry-journal-768.bak`
+  + reverting env/ExecStart. 8809 (teams) still on mistral-1024 — unchanged.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
