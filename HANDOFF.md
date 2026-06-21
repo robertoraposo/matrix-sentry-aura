@@ -622,7 +622,7 @@ The 8808 personal corpus moved from Ollama nomic-768 to **BAAI/bge-m3 (1024-d) s
 - **VERIFIED LIVE**: 781 live memories at dim 1024; recall "cómo se calibró tau" → #65 (exact) dist 0.897;
   recall latency ~186ms (was ~300ms with Ollama-nomic — bge-m3/ante is faster; still a tailscale hop to the GPU
   box, so sub-ms would need Crucible co-located with Matrix); comms/journal intact (lossless).
-- **IMPORTANT FOLLOW-UP — re-calibrate for the new space**: `SENTRY_DEDUP_TAU=0.45` and `SENTRY_RECALL_GAP=1.20`
+- **RE-CALIBRATED for bge-m3 (2026-06-21, results/bge-m3-recalibration.md)**: τ 0.45→**0.50**, recall-gap 1.20→**1.10** (bge-m3 is a more compact space; gap F1 peaks 1.05-1.10; dedup paraphrase/distinct margin is NARROW 0.575 vs 0.618 so τ kept conservative). Applied via env on 8808. (Superseded note) earlier follow-up — re-calibrate for the new space: `SENTRY_DEDUP_TAU=0.45` and `SENTRY_RECALL_GAP=1.20`
   were calibrated on the NOMIC-768 distance distribution. bge-m3-1024 is a DIFFERENT space (the dedup-τ probe's
   top hit is now 0.897 vs ~1.1 before) → both τ and the recall-gap should be re-measured on bge-m3 (same
   data-driven method: results/tau-recalibration.md + results/recall-gap-calibration.md). Until then they're
