@@ -31,16 +31,22 @@ func reembed(src, dst *sentry.Store, emb memory.Embedder, batch int) (stats, err
 		p   memory.MemoryPayload
 	}
 	var mems []mrec
+	var failErr error // fail loud on any corrupt/undecodable record — never silently drop (this rewrites prod data)
 	if err := src.Scan(sentry.Filter{}, func(r sentry.Record) bool {
 		if r.Type == memory.EventMemory {
 			var p memory.MemoryPayload
-			if err := sentry.UnmarshalPayload(r.Payload, &p); err == nil {
-				mems = append(mems, mrec{seq: uint64(r.Seq), p: p})
+			if err := sentry.UnmarshalPayload(r.Payload, &p); err != nil {
+				failErr = fmt.Errorf("decode EventMemory seq %d: %w", r.Seq, err)
+				return false
 			}
+			mems = append(mems, mrec{seq: uint64(r.Seq), p: p})
 		}
 		return true
 	}); err != nil {
 		return st, err
+	}
+	if failErr != nil {
+		return st, failErr
 	}
 	// Batch-embed.
 	vecBySeq := make(map[uint64][]float32, len(mems))
@@ -76,26 +82,27 @@ func reembed(src, dst *sentry.Store, emb memory.Embedder, batch int) (stats, err
 		if r.Type == memory.EventMemory {
 			var p memory.MemoryPayload
 			if err := sentry.UnmarshalPayload(r.Payload, &p); err != nil {
-				return true // skip undecodable (shouldn't happen)
+				failErr = fmt.Errorf("decode EventMemory seq %d: %w", r.Seq, err)
+				return false
 			}
 			p.Vector = vecBySeq[uint64(r.Seq)]
 			if _, err := dst.Append(r.Tenant, memory.EventMemory, p); err != nil {
-				st.records = -1
+				failErr = fmt.Errorf("append memory seq %d: %w", r.Seq, err)
 				return false
 			}
 			st.memories++
 			return true
 		}
 		if _, err := dst.Append(r.Tenant, r.Type, json.RawMessage(r.Payload)); err != nil {
-			st.records = -1
+			failErr = fmt.Errorf("append seq %d type %d: %w", r.Seq, r.Type, err)
 			return false
 		}
 		return true
 	}); err != nil {
 		return st, err
 	}
-	if st.records < 0 {
-		return st, fmt.Errorf("append to dst failed mid-stream")
+	if failErr != nil {
+		return st, failErr
 	}
 	return st, nil
 }
