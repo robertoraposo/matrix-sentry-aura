@@ -17,6 +17,15 @@ import (
 // EventMessage is the journal record type for a channel message.
 const EventMessage sentry.EventType = 5
 
+// EventCommsClear tombstones an area: on rebuild, messages in that area+tenant
+// posted before this record are dropped from the index (the journal keeps them).
+const EventCommsClear sentry.EventType = 7
+
+// ClearPayload names the area to sweep.
+type ClearPayload struct {
+	Area string `json:"area"`
+}
+
 // MessagePayload is the persisted form of one message.
 type MessagePayload struct {
 	Area   string `json:"area"`
@@ -76,6 +85,33 @@ func New(journal *sentry.Store) (*Store, error) {
 	if scanErr != nil {
 		return nil, scanErr
 	}
+
+	// Pass 2: apply area-clear tombstones. A clear at seq S for (tenant, area)
+	// drops that area+tenant's messages with seq < S; later posts survive.
+	ctype := EventCommsClear
+	if err := journal.Scan(sentry.Filter{Type: &ctype}, func(r sentry.Record) bool {
+		var cp ClearPayload
+		if err := sentry.UnmarshalPayload(r.Payload, &cp); err != nil {
+			scanErr = fmt.Errorf("comms: decode clear seq %d: %w", r.Seq, err)
+			return false
+		}
+		cut := uint64(r.Seq)
+		out := s.entries[:0]
+		for _, m := range s.entries {
+			if m.Tenant == r.Tenant && m.Area == cp.Area && m.Seq < cut {
+				continue
+			}
+			out = append(out, m)
+		}
+		s.entries = out
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
 	return s, nil
 }
 
@@ -97,6 +133,34 @@ func (s *Store) Post(tenant sentry.TenantID, p MessagePayload) (uint64, error) {
 	s.entries = append(s.entries, message(uint64(seq), tenant, time.Now().UnixNano(), p))
 	s.pruneAt(time.Now().UnixNano())
 	return uint64(seq), nil
+}
+
+// Clear removes a tenant's messages in area from the live index by appending an
+// EventCommsClear tombstone (the journal record is retained). Messages posted to
+// the area AFTER the clear survive (the clear's own seq is the cutoff). Returns
+// how many index entries were dropped.
+func (s *Store) Clear(tenant sentry.TenantID, area string) (int, error) {
+	if area == "" {
+		return 0, fmt.Errorf("comms: area required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seq, err := s.journal.Append(tenant, EventCommsClear, ClearPayload{Area: area})
+	if err != nil {
+		return 0, fmt.Errorf("comms: append clear: %w", err)
+	}
+	cut := uint64(seq)
+	out := s.entries[:0]
+	dropped := 0
+	for _, m := range s.entries {
+		if m.Tenant == tenant && m.Area == area && m.Seq < cut {
+			dropped++
+			continue
+		}
+		out = append(out, m)
+	}
+	s.entries = out
+	return dropped, nil
 }
 
 // Read returns tenant's messages in area with Seq > since, in seq order.

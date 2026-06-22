@@ -201,3 +201,49 @@ func TestRecentReturnsLastN(t *testing.T) {
 		}
 	}
 }
+
+func TestClearAreaTombstoneSurvivesReopen(t *testing.T) {
+	st, dir := newTestStore(t)
+	st.Post(1, MessagePayload{Area: "X", From: "a", Text: "x1"})
+	st.Post(1, MessagePayload{Area: "X", From: "a", Text: "x2"})
+	st.Post(1, MessagePayload{Area: "Y", From: "a", Text: "y1"})
+	st.Post(2, MessagePayload{Area: "X", From: "z", Text: "other-tenant"})
+
+	cleared, err := st.Clear(1, "X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != 2 {
+		t.Fatalf("want 2 cleared, got %d", cleared)
+	}
+	if len(st.Read(1, "X", 0)) != 0 {
+		t.Fatal("X not cleared in index")
+	}
+	if len(st.Read(1, "Y", 0)) != 1 {
+		t.Fatal("Y must be untouched")
+	}
+	if len(st.Read(2, "X", 0)) != 1 {
+		t.Fatal("tenant 2's X must be untouched")
+	}
+
+	st.Post(1, MessagePayload{Area: "X", From: "a", Text: "x3-after"})
+	if g := st.Read(1, "X", 0); len(g) != 1 || g[0].Text != "x3-after" {
+		t.Fatalf("post-clear message should survive: %+v", g)
+	}
+
+	jr, err := sentry.Open(dir, sentry.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jr.Close()
+	re, err := New(jr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := re.Read(1, "X", 0); len(g) != 1 || g[0].Text != "x3-after" {
+		t.Fatalf("after reopen, X should have only x3-after: %+v", g)
+	}
+	if len(re.Read(1, "Y", 0)) != 1 {
+		t.Fatal("Y lost on reopen")
+	}
+}
