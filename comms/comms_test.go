@@ -2,6 +2,7 @@ package comms
 
 import (
 	"testing"
+	"time"
 
 	"matrixsentry/sentry"
 )
@@ -144,6 +145,40 @@ func TestInboxFiltersByTarget(t *testing.T) {
 	in2 := st.Inbox(1, "me", in[0].Seq)
 	if len(in2) != 1 {
 		t.Fatalf("since should return only newer, got %d", len(in2))
+	}
+}
+
+func TestRetentionCountAndTime(t *testing.T) {
+	st, _ := newTestStore(t)
+	for i := 0; i < 5; i++ {
+		st.Post(1, MessagePayload{Area: "x", From: "a", Text: "m"})
+	}
+	st.SetRetention(3, 0) // count only
+	if got := len(st.Recent(1, 100)); got != 3 {
+		t.Fatalf("count retention: want 3, got %d", got)
+	}
+
+	now := time.Now().UnixNano()
+	st2, _ := newTestStore(t)
+	st2.SetRetention(0, time.Hour) // time only
+	st2.entries = []Message{
+		{Seq: 1, Tenant: 1, TS: now - 2*int64(time.Hour), Area: "x", Text: "old"},
+		{Seq: 2, Tenant: 1, TS: now - 10*int64(time.Minute), Area: "x", Text: "fresh"},
+	}
+	st2.pruneAt(now)
+	if g := st2.Recent(1, 100); len(g) != 1 || g[0].Text != "fresh" {
+		t.Fatalf("time retention: want only 'fresh', got %+v", g)
+	}
+
+	st3, _ := newTestStore(t)
+	st3.SetRetention(1, time.Hour) // both
+	st3.entries = []Message{
+		{Seq: 1, Tenant: 1, TS: now - 10*int64(time.Minute), Area: "x", Text: "older-fresh"},
+		{Seq: 2, Tenant: 1, TS: now - 5*int64(time.Minute), Area: "x", Text: "newest"},
+	}
+	st3.pruneAt(now)
+	if g := st3.Recent(1, 100); len(g) != 1 || g[0].Text != "newest" {
+		t.Fatalf("count∩time: want only 'newest', got %+v", g)
 	}
 }
 

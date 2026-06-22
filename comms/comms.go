@@ -42,9 +42,11 @@ type Message struct {
 
 // Store is the message log: a journal for durability plus an in-RAM index.
 type Store struct {
-	journal *sentry.Store
-	mu      sync.Mutex
-	entries []Message
+	journal   *sentry.Store
+	mu        sync.Mutex
+	entries   []Message
+	retainN   int           // keep at most the last N messages in the index (0 = off)
+	retainAge time.Duration // drop messages older than this from the index (0 = off)
 }
 
 func message(seq uint64, tenant sentry.TenantID, ts int64, p MessagePayload) Message {
@@ -93,6 +95,7 @@ func (s *Store) Post(tenant sentry.TenantID, p MessagePayload) (uint64, error) {
 		return 0, fmt.Errorf("comms: append: %w", err)
 	}
 	s.entries = append(s.entries, message(uint64(seq), tenant, time.Now().UnixNano(), p))
+	s.pruneAt(time.Now().UnixNano())
 	return uint64(seq), nil
 }
 
@@ -139,6 +142,40 @@ func (s *Store) Recent(tenant sentry.TenantID, limit int) []Message {
 		out = out[len(out)-limit:]
 	}
 	return out
+}
+
+// SetRetention bounds the in-RAM index: keep only messages BOTH within the last n
+// (0 = off) AND newer than age (0 = off). The journal is untouched (audit).
+// Applied here and after every Post. Global across tenants (RAM bound).
+func (s *Store) SetRetention(n int, age time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retainN = n
+	s.retainAge = age
+	s.pruneAt(time.Now().UnixNano())
+}
+
+// pruneAt drops index entries failing either retention knob. Caller holds s.mu.
+func (s *Store) pruneAt(now int64) {
+	if s.retainN <= 0 && s.retainAge <= 0 {
+		return
+	}
+	start := 0
+	if s.retainN > 0 && len(s.entries) > s.retainN {
+		start = len(s.entries) - s.retainN
+	}
+	var cutoff int64
+	if s.retainAge > 0 {
+		cutoff = now - int64(s.retainAge)
+	}
+	out := make([]Message, 0, len(s.entries)-start)
+	for _, m := range s.entries[start:] {
+		if cutoff > 0 && m.TS < cutoff {
+			continue
+		}
+		out = append(out, m)
+	}
+	s.entries = out
 }
 
 // Get returns the message at seq in area for tenant.
