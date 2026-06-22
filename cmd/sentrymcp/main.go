@@ -119,6 +119,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "sentrymcp: init comms: %v\n", err)
 		os.Exit(1)
 	}
+	s.chat.SetRetention(envInt("SENTRY_COMMS_RETAIN_N", 2000), time.Duration(envInt("SENTRY_COMMS_RETAIN_DAYS", 14))*24*time.Hour)
 
 	// Build the token registry from SENTRY_TOKENS_FILE (opt-in multi-tenant).
 	// With no file, only the owner entry exists → identical to single-tenant today.
@@ -589,6 +590,15 @@ func toolList() []map[string]any {
 			},
 		},
 		{
+			"name":        "comms_clear",
+			"description": "Sweep a FINISHED coordination area: drops its messages from the live channel (the durable journal is retained for audit). Use when an area's work is done; promote anything worth keeping to memory first. Tenant-scoped.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"area": map[string]any{"type": "string", "description": "the area to clear"}},
+				"required":   []any{"area"},
+			},
+		},
+		{
 			"name":        "inbox",
 			"description": "Fetch all messages directed at YOU (by target) across every area, in one call — so you never miss a directed message by polling the wrong area. Pass target=<your agent label> and since=<the last # you saw> for only-newer. The response ends with the latest # to use as your next cursor. Reply with post(area=…, kind=\"answer\", ref=<that #>, target=<sender>).",
 			"inputSchema": map[string]any{
@@ -861,6 +871,16 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		}
 		fmt.Fprintf(&b, "(cursor: #%d)", last)
 		return s.toolText(req.ID, b.String())
+	case "comms_clear":
+		area, _ := strArg(p.Args, "area")
+		if area == "" {
+			return s.toolErr(req.ID, "provide 'area' to clear")
+		}
+		n, err := s.chat.Clear(tenant, area)
+		if err != nil {
+			return s.toolErr(req.ID, "comms_clear failed: "+err.Error())
+		}
+		return s.toolText(req.ID, fmt.Sprintf("cleared %d message(s) from area %q (journal retained)", n, area))
 	case "inbox":
 		target, _ := strArg(p.Args, "target")
 		if target == "" {
@@ -964,6 +984,15 @@ func stringsArg(args map[string]any, key string) []string {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }

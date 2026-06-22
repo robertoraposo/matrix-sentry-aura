@@ -636,3 +636,20 @@ func TestAdminCommsReturnsTenantMessages(t *testing.T) {
 		t.Fatalf("first message wrong: %+v", out.Messages[0])
 	}
 }
+
+func TestCommsClearTool(t *testing.T) {
+	s := newMemServer(t)
+	if s.chat == nil {
+		s.chat, _ = comms.New(s.store)
+	}
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "build", From: "a", Text: "m1"})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "build", From: "a", Text: "m2"})
+	resp := callNamed(s, "comms_clear", map[string]any{"area": "build"})
+	text := respText(t, resp)
+	if !strings.Contains(text, "2") {
+		t.Fatalf("comms_clear should report 2 cleared, got: %s", text)
+	}
+	if len(s.chat.Read(s.tenant, "build", 0)) != 0 {
+		t.Fatal("area not cleared")
+	}
+}
