@@ -629,6 +629,25 @@ The 8808 personal corpus moved from Ollama nomic-768 to **BAAI/bge-m3 (1024-d) s
   stale-but-safe-ish; re-calibration is the next correctness step. Rollback available via `sentry-journal-768.bak`
   + reverting env/ExecStart. 8809 (teams) still on mistral-1024 — unchanged.
 
+## ✅ COMMS RETENTION + comms_clear — deployed (2026-06-22)
+
+Comms was append-only with no cleanup (605 msgs, ~666/day, unbounded in-RAM growth). Now bounded automatically +
+an explicit area sweep. Spec/plan `docs/superpowers/{specs,plans}/2026-06-22-comms-retention-clear.*`.
+- **Retention (count ∩ time)** on the comms in-RAM index: `comms.Store.SetRetention(n, age)` + `pruneAt` keep a
+  message only if it's BOTH within the last N AND newer than T days; applied on SetRetention + after every Post.
+  Wired from env `SENTRY_COMMS_RETAIN_N` (default 2000) + `SENTRY_COMMS_RETAIN_DAYS` (default 14); 0 disables a
+  knob. The JOURNAL is never touched (full audit). Global across tenants (RAM bound; owner-dominated).
+- **`comms_clear(area)` tool** + `comms.Store.Clear`: appends an `EventCommsClear` (type 7) tombstone and drops
+  that tenant+area's messages (seq < the clear's seq) from the live index. Survives restart (New pass-2 replays
+  clears); messages posted AFTER a clear survive (point-in-time sweep → areas reusable). Tenant-scoped. Mirrors
+  memory's forget.
+- Agents DON'T clean (no signal needed): post + `promote` keepers; retention ages out the rest; comms_clear is
+  the owner/orchestrator's broom for a closed area.
+- Journal event-type registry: 1=Access, 2=PathMap, 3=Memory, 4=Forget, 6=Recall (memory), 5=Message,
+  **7=CommsClear** (comms). Next new type = 8.
+- Deployed 8808+8809; verified: comms reads intact, comms_clear sweeps a test area live (post→clear→read empty),
+  retention active.
+
 ## Field status (2026-06-15)
 
 Matrix Sentry is in DAILY production use as a fast, persistent shared brain across FIVE independent agent
