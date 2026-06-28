@@ -202,6 +202,38 @@ func TestRecentReturnsLastN(t *testing.T) {
 	}
 }
 
+func TestPostImageAndGetBySeq(t *testing.T) {
+	st, _ := newTestStore(t) // existing helper that wraps a temp journal in comms.New
+	seq, err := st.PostImage(1, MessagePayload{
+		Area: "ui", From: "designer", Mime: "image/png",
+		BlobID: "abc123", W: 800, H: 600, Size: 4096, Text: "login mock",
+	})
+	if err != nil {
+		t.Fatalf("PostImage: %v", err)
+	}
+
+	// Read surfaces the ref (no bytes), Kind forced to "image".
+	got := st.Read(1, "ui", 0)
+	if len(got) != 1 || got[0].BlobID != "abc123" || got[0].Kind != "image" || got[0].Mime != "image/png" {
+		t.Fatalf("Read image msg = %+v", got)
+	}
+
+	// GetBySeq returns the tenant's message regardless of area.
+	m, ok := st.GetBySeq(1, seq)
+	if !ok || m.BlobID != "abc123" || m.W != 800 {
+		t.Fatalf("GetBySeq = %+v ok=%v", m, ok)
+	}
+	// Tenant isolation: another tenant cannot read it.
+	if _, ok := st.GetBySeq(2, seq); ok {
+		t.Fatal("GetBySeq must be tenant-scoped")
+	}
+
+	// Missing blob/mime is rejected.
+	if _, err := st.PostImage(1, MessagePayload{Area: "ui", From: "x"}); err == nil {
+		t.Fatal("PostImage without BlobID/Mime must error")
+	}
+}
+
 func TestClearAreaTombstoneSurvivesReopen(t *testing.T) {
 	st, dir := newTestStore(t)
 	st.Post(1, MessagePayload{Area: "X", From: "a", Text: "x1"})
