@@ -27,6 +27,16 @@ const EventCommsClear sentry.EventType = 7
 // bytes live in the blob store; only this small ref rides the in-RAM index.
 const EventImage sentry.EventType = 8
 
+// EventBlobPin records a pin (On=true) or unpin (On=false) of a blob sha, so a
+// blob survives GC independently of whether a live message still references it.
+const EventBlobPin sentry.EventType = 9
+
+// PinPayload is the persisted pin/unpin of a blob.
+type PinPayload struct {
+	BlobID string `json:"blob"`
+	On     bool   `json:"on"`
+}
+
 // ClearPayload names the area to sweep.
 type ClearPayload struct {
 	Area string `json:"area"`
@@ -74,6 +84,7 @@ type Store struct {
 	entries   []Message
 	retainN   int           // keep at most the last N messages in the index (0 = off)
 	retainAge time.Duration // drop messages older than this from the index (0 = off)
+	pinned    map[string]bool // blob sha kept from GC regardless of message retention
 }
 
 func message(seq uint64, tenant sentry.TenantID, ts int64, p MessagePayload) Message {
@@ -143,6 +154,28 @@ func New(journal *sentry.Store) (*Store, error) {
 			out = append(out, m)
 		}
 		s.entries = out
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
+	// Pass 3: replay blob pins (seq order → final on/off state wins).
+	s.pinned = map[string]bool{}
+	ptype := EventBlobPin
+	if err := journal.Scan(sentry.Filter{Type: &ptype}, func(r sentry.Record) bool {
+		var pp PinPayload
+		if err := sentry.UnmarshalPayload(r.Payload, &pp); err != nil {
+			scanErr = fmt.Errorf("comms: decode pin seq %d: %w", r.Seq, err)
+			return false
+		}
+		if pp.On {
+			s.pinned[pp.BlobID] = true
+		} else {
+			delete(s.pinned, pp.BlobID)
+		}
 		return true
 	}); err != nil {
 		return nil, err
@@ -323,4 +356,44 @@ func (s *Store) Get(tenant sentry.TenantID, area string, seq uint64) (Message, b
 		}
 	}
 	return Message{}, false
+}
+
+// Pin records a pin (on=true) or unpin (on=false) for a blob sha and updates the
+// in-RAM pinned set. Pins are global (a blob is content-addressed and shared);
+// tenant is recorded for audit only.
+func (s *Store) Pin(tenant sentry.TenantID, blobID string, on bool) error {
+	if blobID == "" {
+		return fmt.Errorf("comms: blob id required to pin")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.journal.Append(tenant, EventBlobPin, PinPayload{BlobID: blobID, On: on}); err != nil {
+		return fmt.Errorf("comms: append pin: %w", err)
+	}
+	if s.pinned == nil {
+		s.pinned = map[string]bool{}
+	}
+	if on {
+		s.pinned[blobID] = true
+	} else {
+		delete(s.pinned, blobID)
+	}
+	return nil
+}
+
+// LiveBlobIDs returns the GC keep-set: every blob referenced by a live image
+// message (across ALL tenants — blobs are shared) plus every pinned sha.
+func (s *Store) LiveBlobIDs() map[string]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keep := map[string]bool{}
+	for _, m := range s.entries {
+		if m.BlobID != "" {
+			keep[m.BlobID] = true
+		}
+	}
+	for sha := range s.pinned {
+		keep[sha] = true
+	}
+	return keep
 }

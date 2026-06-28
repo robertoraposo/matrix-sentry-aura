@@ -234,6 +234,38 @@ func TestPostImageAndGetBySeq(t *testing.T) {
 	}
 }
 
+func TestLiveBlobIDsAndPin(t *testing.T) {
+	st, _ := newTestStore(t)
+	st.PostImage(1, MessagePayload{Area: "ui", From: "d", Mime: "image/png", BlobID: "live1"})
+
+	keep := st.LiveBlobIDs()
+	if !keep["live1"] {
+		t.Fatal("a referenced blob must be in the keep-set")
+	}
+
+	// A pinned blob with no live message must still be kept.
+	if err := st.Pin(1, "pinned1", true); err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	if !st.LiveBlobIDs()["pinned1"] {
+		t.Fatal("a pinned blob must be in the keep-set")
+	}
+
+	// Unpin removes it from the keep-set.
+	if err := st.Pin(1, "pinned1", false); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if st.LiveBlobIDs()["pinned1"] {
+		t.Fatal("an unpinned, unreferenced blob must NOT be kept")
+	}
+
+	// comms_clear drops the ref → blob leaves the keep-set.
+	st.Clear(1, "ui")
+	if st.LiveBlobIDs()["live1"] {
+		t.Fatal("cleared image ref must leave the keep-set")
+	}
+}
+
 func TestClearAreaTombstoneSurvivesReopen(t *testing.T) {
 	st, dir := newTestStore(t)
 	st.Post(1, MessagePayload{Area: "X", From: "a", Text: "x1"})
