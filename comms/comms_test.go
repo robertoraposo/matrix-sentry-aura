@@ -202,6 +202,100 @@ func TestRecentReturnsLastN(t *testing.T) {
 	}
 }
 
+func TestPostImageAndGetBySeq(t *testing.T) {
+	st, _ := newTestStore(t) // existing helper that wraps a temp journal in comms.New
+	seq, err := st.PostImage(1, MessagePayload{
+		Area: "ui", From: "designer", Mime: "image/png",
+		BlobID: "abc123", W: 800, H: 600, Size: 4096, Text: "login mock",
+	})
+	if err != nil {
+		t.Fatalf("PostImage: %v", err)
+	}
+
+	// Read surfaces the ref (no bytes), Kind forced to "image".
+	got := st.Read(1, "ui", 0)
+	if len(got) != 1 || got[0].BlobID != "abc123" || got[0].Kind != "image" || got[0].Mime != "image/png" {
+		t.Fatalf("Read image msg = %+v", got)
+	}
+
+	// GetBySeq returns the tenant's message regardless of area.
+	m, ok := st.GetBySeq(1, seq)
+	if !ok || m.BlobID != "abc123" || m.W != 800 {
+		t.Fatalf("GetBySeq = %+v ok=%v", m, ok)
+	}
+	// Tenant isolation: another tenant cannot read it.
+	if _, ok := st.GetBySeq(2, seq); ok {
+		t.Fatal("GetBySeq must be tenant-scoped")
+	}
+
+	// Missing blob/mime is rejected.
+	if _, err := st.PostImage(1, MessagePayload{Area: "ui", From: "x"}); err == nil {
+		t.Fatal("PostImage without BlobID/Mime must error")
+	}
+}
+
+func TestLiveBlobIDsAndPin(t *testing.T) {
+	st, _ := newTestStore(t)
+	st.PostImage(1, MessagePayload{Area: "ui", From: "d", Mime: "image/png", BlobID: "live1"})
+
+	keep := st.LiveBlobIDs()
+	if !keep["live1"] {
+		t.Fatal("a referenced blob must be in the keep-set")
+	}
+
+	// A pinned blob with no live message must still be kept.
+	if err := st.Pin(1, "pinned1", true); err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	if !st.LiveBlobIDs()["pinned1"] {
+		t.Fatal("a pinned blob must be in the keep-set")
+	}
+
+	// Unpin removes it from the keep-set.
+	if err := st.Pin(1, "pinned1", false); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if st.LiveBlobIDs()["pinned1"] {
+		t.Fatal("an unpinned, unreferenced blob must NOT be kept")
+	}
+
+	// comms_clear drops the ref → blob leaves the keep-set.
+	st.Clear(1, "ui")
+	if st.LiveBlobIDs()["live1"] {
+		t.Fatal("cleared image ref must leave the keep-set")
+	}
+}
+
+// TestPinIsPerTenant verifies that unpinning by one tenant does NOT remove
+// another tenant's pin: a blob is kept as long as ANY tenant pins it.
+func TestPinIsPerTenant(t *testing.T) {
+	st, _ := newTestStore(t)
+
+	// Tenant 1 pins sha X.
+	if err := st.Pin(1, "shaX", true); err != nil {
+		t.Fatalf("tenant 1 Pin: %v", err)
+	}
+	if !st.LiveBlobIDs()["shaX"] {
+		t.Fatal("shaX must be in keep-set after tenant 1 pins it")
+	}
+
+	// Tenant 2 unpins sha X — tenant 1's pin must survive.
+	if err := st.Pin(2, "shaX", false); err != nil {
+		t.Fatalf("tenant 2 unPin: %v", err)
+	}
+	if !st.LiveBlobIDs()["shaX"] {
+		t.Fatal("shaX must remain in keep-set: tenant 1's pin is still active")
+	}
+
+	// Tenant 1 also unpins — now no tenant pins shaX, so it must leave the keep-set.
+	if err := st.Pin(1, "shaX", false); err != nil {
+		t.Fatalf("tenant 1 unPin: %v", err)
+	}
+	if st.LiveBlobIDs()["shaX"] {
+		t.Fatal("shaX must NOT be in keep-set once all tenants have unpinned it")
+	}
+}
+
 func TestClearAreaTombstoneSurvivesReopen(t *testing.T) {
 	st, dir := newTestStore(t)
 	st.Post(1, MessagePayload{Area: "X", From: "a", Text: "x1"})
