@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -754,5 +756,55 @@ func TestPostImageGetImageRoundTrip(t *testing.T) {
 		"area": "ui", "from": "d", "mime": "application/pdf", "data": b64,
 	})) {
 		t.Fatal("non-image mime must be rejected")
+	}
+}
+
+// blobOf returns the hex-encoded sha256 of raw — the blob ID the store assigns.
+func blobOf(t *testing.T, raw []byte) string {
+	t.Helper()
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// gcDeleted parses the deleted count from a blob_gc response text "deleted N orphan blob(s) ...".
+func gcDeleted(t *testing.T, r rpcResp) int {
+	t.Helper()
+	text := respText(t, r)
+	var n int
+	fmt.Sscanf(text, "deleted %d", &n)
+	return n
+}
+
+func TestPinSurvivesBlobGC(t *testing.T) {
+	s := newMemServer(t) // has s.chat set
+	var err error
+	s.blobs, err = blob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw := []byte("\x89PNG\r\n\x1a\n keep me")
+	b64 := base64.StdEncoding.EncodeToString(raw)
+	post := callNamed(s, "post_image", map[string]any{
+		"area": "ui", "from": "d", "mime": "image/png", "data": b64,
+	})
+	seq := extractSeq(t, post)
+
+	// Pin while the message is still live, then clear the area (drops the live ref).
+	callNamed(s, "pin_image", map[string]any{"seq": float64(seq)})
+	callNamed(s, "comms_clear", map[string]any{"area": "ui"})
+
+	// blob_gc with a pinned blob must delete 0.
+	gc := callNamed(s, "blob_gc", map[string]any{})
+	if isToolError(gc) {
+		t.Fatalf("blob_gc errored: %v", gc)
+	}
+	if got := gcDeleted(t, gc); got != 0 {
+		t.Fatalf("blob_gc deleted %d, want 0 (pinned)", got)
+	}
+
+	// Pinned blob must remain in the keep-set even though no live message references it.
+	if !s.chat.LiveBlobIDs()[blobOf(t, raw)] {
+		t.Fatal("pinned blob must remain in keep-set after clear")
 	}
 }

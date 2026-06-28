@@ -659,6 +659,29 @@ func toolList() []map[string]any {
 			},
 		},
 		{
+			"name":        "pin_image",
+			"description": "Pin an image so it survives channel retention and comms_clear (the blob is never GC'd while pinned). Pass the image message #.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"seq": map[string]any{"type": "integer", "description": "the image message # to pin"}},
+				"required":   []any{"seq"},
+			},
+		},
+		{
+			"name":        "unpin_image",
+			"description": "Remove a pin from an image so it can be garbage-collected once no live message references it. Pass the image message #.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"seq": map[string]any{"type": "integer", "description": "the image message # to unpin"}},
+				"required":   []any{"seq"},
+			},
+		},
+		{
+			"name":        "blob_gc",
+			"description": "Delete orphan image blobs no live message references and that aren't pinned (the journal is retained). Owner/orchestrator housekeeping.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
 			"name":        "promote",
 			"description": "Promote a channel message to durable semantic memory (remember), e.g. a decision or an answer worth keeping. The message stays in the channel; a memory is also created.",
 			"inputSchema": map[string]any{
@@ -908,7 +931,11 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			if to == "" {
 				to = "all"
 			}
-			fmt.Fprintf(&b, "#%d [%s] %s→%s: %s\n", m.Seq, m.Kind, m.From, to, m.Text)
+			if m.BlobID != "" {
+				fmt.Fprintf(&b, "#%d [image] %s→%s: %s [%s %dx%d %dB · get_image(%d)]\n", m.Seq, m.From, to, m.Text, m.Mime, m.W, m.H, m.Size, m.Seq)
+			} else {
+				fmt.Fprintf(&b, "#%d [%s] %s→%s: %s\n", m.Seq, m.Kind, m.From, to, m.Text)
+			}
 			if m.Seq > last {
 				last = m.Seq
 			}
@@ -950,7 +977,11 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 				if tgt == "" {
 					tgt = "all"
 				}
-				fmt.Fprintf(&b, "#%d [%s] %s→%s @%s: %s\n", m.Seq, m.Kind, m.From, tgt, m.Area, m.Text)
+				if m.BlobID != "" {
+					fmt.Fprintf(&b, "#%d [image] %s→%s @%s: %s [%s %dx%d · get_image(%d)]\n", m.Seq, m.From, tgt, m.Area, m.Text, m.Mime, m.W, m.H, m.Seq)
+				} else {
+					fmt.Fprintf(&b, "#%d [%s] %s→%s @%s: %s\n", m.Seq, m.Kind, m.From, tgt, m.Area, m.Text)
+				}
 				if m.Seq > cursor {
 					cursor = m.Seq
 				}
@@ -1014,6 +1045,31 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			return s.toolErr(req.ID, "image bytes unavailable (blob "+m.BlobID+"): "+err.Error())
 		}
 		return s.toolImage(req.ID, base64.StdEncoding.EncodeToString(raw), m.Mime, m.Text)
+	case "pin_image", "unpin_image":
+		seq := uintArg(p.Args, "seq")
+		if seq == 0 {
+			return s.toolErr(req.ID, "provide the 'seq' of the image")
+		}
+		m, ok := s.chat.GetBySeq(tenant, seq)
+		if !ok || m.BlobID == "" {
+			return s.toolErr(req.ID, fmt.Sprintf("image #%d not found for this tenant", seq))
+		}
+		on := p.Name == "pin_image"
+		if err := s.chat.Pin(tenant, m.BlobID, on); err != nil {
+			return s.toolErr(req.ID, "pin failed: "+err.Error())
+		}
+		verb := "pinned"
+		if !on {
+			verb = "unpinned"
+		}
+		return s.toolText(req.ID, fmt.Sprintf("%s image #%d", verb, seq))
+	case "blob_gc":
+		n, err := s.blobs.Sweep(s.chat.LiveBlobIDs())
+		if err != nil {
+			return s.toolErr(req.ID, "blob_gc failed: "+err.Error())
+		}
+		s.moko.Info("blob_gc", map[string]string{"tenant": fmt.Sprint(tenant), "deleted": fmt.Sprint(n)})
+		return s.toolText(req.ID, fmt.Sprintf("deleted %d orphan blob(s) (journal retained)", n))
 	case "promote":
 		if s.mem == nil {
 			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
