@@ -172,7 +172,9 @@ func main() {
 			os.Exit(1)
 		}
 		s.oauth = newOAuth(*oauthIssuer, secret, s.tokens.Tenant)
-		moko.Info("native OAuth enabled", map[string]string{"issuer": *oauthIssuer})
+		extraHosts := envOr("SENTRY_OAUTH_EXTRA_REDIRECT_HOSTS", "")
+		s.oauth.setExtraRedirectHosts(extraHosts)
+		moko.Info("native OAuth enabled", map[string]string{"issuer": *oauthIssuer, "extra_redirect_hosts": extraHosts})
 	}
 
 	if *httpAddr != "" {

@@ -345,6 +345,7 @@ func TestAuthorizeRejectsUnregisteredRedirect(t *testing.T) {
 }
 
 func TestAllowedRedirect(t *testing.T) {
+	o := newTestOAuth()
 	ok := []string{
 		"https://claude.ai/api/mcp/auth_callback",
 		"https://claude.com/api/mcp/auth_callback",
@@ -361,14 +362,46 @@ func TestAllowedRedirect(t *testing.T) {
 		"https://claude.ai@evil.com/cb",
 	}
 	for _, u := range ok {
-		if !allowedRedirect(u) {
+		if !o.allowedRedirect(u) {
 			t.Errorf("should allow %q", u)
 		}
 	}
 	for _, u := range bad {
-		if allowedRedirect(u) {
+		if o.allowedRedirect(u) {
 			t.Errorf("should reject %q", u)
 		}
+	}
+}
+
+func TestExtraRedirectHosts(t *testing.T) {
+	o := newTestOAuth()
+	grok := "https://grok.com/connectors-oauth-exchange-code/"
+	if o.allowedRedirect(grok) {
+		t.Fatal("grok.com must be rejected before it is configured")
+	}
+	o.setExtraRedirectHosts("grok.com, chatgpt.com")
+	if !o.allowedRedirect(grok) {
+		t.Error("grok.com should be allowed once configured")
+	}
+	if !o.allowedRedirect("https://chatgpt.com/cb") {
+		t.Error("chatgpt.com should be allowed once configured")
+	}
+	// Extra hosts enforce the SAME guards as the built-in allowlist: https only,
+	// exact host (no suffix tricks), no userinfo. A configured vendor host must
+	// not become a hole.
+	for _, bad := range []string{
+		"http://grok.com/cb",           // http, not https
+		"https://grok.com.evil.com/cb", // suffix trick
+		"https://grok.com@evil.com/cb", // userinfo
+		"https://evil.com/cb",          // never configured
+	} {
+		if o.allowedRedirect(bad) {
+			t.Errorf("must reject %q even with grok.com configured", bad)
+		}
+	}
+	// Built-ins still work through the method form.
+	if !o.allowedRedirect("https://claude.ai/api/mcp/auth_callback") {
+		t.Error("built-in claude.ai must still be allowed via the method")
 	}
 }
 

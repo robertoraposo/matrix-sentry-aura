@@ -50,6 +50,7 @@ type oauthProvider struct {
 	tenantFor     func(secret string) (sentry.TenantID, bool) // consent passphrase → tenant
 	mu            sync.Mutex
 	codes         map[string]authCode
+	extraHosts    map[string]bool // owner-approved third-party redirect hosts (https only), e.g. grok.com
 }
 
 func newOAuth(issuer, approveSecret string, tenantFor func(string) (sentry.TenantID, bool)) *oauthProvider {
@@ -60,7 +61,23 @@ func newOAuth(issuer, approveSecret string, tenantFor func(string) (sentry.Tenan
 		signKey:       k[:],
 		tenantFor:     tenantFor,
 		codes:         map[string]authCode{},
+		extraHosts:    map[string]bool{},
 	}
+}
+
+// setExtraRedirectHosts adds owner-approved third-party redirect hosts to the
+// allowlist from a comma/space-separated list (e.g. "grok.com, chatgpt.com").
+// These are additive to the built-in hosts and subject to the SAME guards
+// (https only, exact host, no userinfo) — see allowedRedirect. Hosts are
+// lowercased; empty entries are ignored. Replaces any previously-set extras.
+func (o *oauthProvider) setExtraRedirectHosts(list string) {
+	hosts := map[string]bool{}
+	for _, f := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		if h := strings.ToLower(strings.TrimSpace(f)); h != "" {
+			hosts[h] = true
+		}
+	}
+	o.extraHosts = hosts
 }
 
 // --- crypto helpers ---
@@ -77,9 +94,10 @@ func randToken(nbytes int) string {
 // theft: without it, an attacker who phishes the owner into approving a request
 // with their own PKCE pair could redirect the code to a site they control and
 // exchange it (PKCE alone doesn't help — the attacker generated the pair). We
-// allow only Anthropic's HTTPS callback hosts and loopback (RFC 8252) for local
-// MCP clients. Exact host match, no substring/suffix tricks, no userinfo.
-func allowedRedirect(raw string) bool {
+// allow Anthropic's HTTPS callback hosts, loopback (RFC 8252) for local MCP
+// clients, and any owner-approved third-party HTTPS hosts (extraHosts, e.g.
+// grok.com). Exact host match, no substring/suffix tricks, no userinfo.
+func (o *oauthProvider) allowedRedirect(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.User != nil {
 		return false
@@ -89,6 +107,9 @@ func allowedRedirect(raw string) bool {
 		return true
 	}
 	if (u.Scheme == "http" || u.Scheme == "https") && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+		return true
+	}
+	if u.Scheme == "https" && o.extraHosts[host] {
 		return true
 	}
 	return false
@@ -290,7 +311,7 @@ func (o *oauthProvider) handleAuthorize(w http.ResponseWriter, r *http.Request) 
 
 	// Reject a bad redirect_uri up front (both GET and POST) so a malicious one
 	// never reaches the consent form or a code.
-	if ru := get("redirect_uri"); ru == "" || !allowedRedirect(ru) {
+	if ru := get("redirect_uri"); ru == "" || !o.allowedRedirect(ru) {
 		http.Error(w, "invalid_request: redirect_uri not allowed", http.StatusBadRequest)
 		return
 	}
