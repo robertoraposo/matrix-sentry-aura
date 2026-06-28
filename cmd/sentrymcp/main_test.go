@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"matrixsentry/blob"
 	"matrixsentry/comms"
 	"matrixsentry/memory"
 	"matrixsentry/mokoblinks"
@@ -651,5 +654,105 @@ func TestCommsClearTool(t *testing.T) {
 	}
 	if len(s.chat.Read(s.tenant, "build", 0)) != 0 {
 		t.Fatal("area not cleared")
+	}
+}
+
+// --- post_image / get_image helpers ---
+
+// extractSeq parses a sequence number from "#N" in the tool's first text block.
+func extractSeq(t *testing.T, r rpcResp) uint64 {
+	t.Helper()
+	m, ok := r.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("extractSeq: result not a map: %#v", r.Result)
+	}
+	if m["isError"] == true {
+		t.Fatalf("extractSeq: tool returned error: %#v", m["content"])
+	}
+	content := m["content"].([]map[string]any)
+	text := content[0]["text"].(string)
+	i := strings.Index(text, "#")
+	if i < 0 {
+		t.Fatalf("extractSeq: no '#' in text: %q", text)
+	}
+	var n uint64
+	fmt.Sscanf(text[i+1:], "%d", &n)
+	if n == 0 {
+		t.Fatalf("extractSeq: seq=0 parsed from %q", text)
+	}
+	return n
+}
+
+// firstImageContent finds the first {type:"image"} block in a tool response.
+func firstImageContent(t *testing.T, r rpcResp) map[string]any {
+	t.Helper()
+	m, ok := r.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("firstImageContent: result not a map: %#v", r.Result)
+	}
+	if m["isError"] == true {
+		t.Fatalf("firstImageContent: tool returned error: %#v", m["content"])
+	}
+	content := m["content"].([]map[string]any)
+	for _, block := range content {
+		if block["type"] == "image" {
+			return block
+		}
+	}
+	t.Fatalf("firstImageContent: no image block in %#v", content)
+	return nil
+}
+
+// isToolError reports whether a tool response has isError=true.
+func isToolError(r rpcResp) bool {
+	m, ok := r.Result.(map[string]any)
+	if !ok {
+		return false
+	}
+	return m["isError"] == true
+}
+
+func TestPostImageGetImageRoundTrip(t *testing.T) {
+	s := newMemServer(t) // has s.chat set
+	var err error
+	s.blobs, err = blob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw := []byte("\x89PNG\r\n\x1a\n fake")
+	b64 := base64.StdEncoding.EncodeToString(raw)
+
+	// post_image
+	post := callNamed(s, "post_image", map[string]any{
+		"area": "ui", "from": "designer", "mime": "image/png",
+		"data": b64, "caption": "mock",
+	})
+	seq := extractSeq(t, post)
+
+	// get_image returns MCP image content with identical bytes.
+	got := callNamed(s, "get_image", map[string]any{"seq": float64(seq)})
+	img := firstImageContent(t, got)
+	if img["mimeType"] != "image/png" {
+		t.Fatalf("mime = %v", img["mimeType"])
+	}
+	decoded, _ := base64.StdEncoding.DecodeString(img["data"].(string))
+	if !bytes.Equal(decoded, raw) {
+		t.Fatal("round-trip bytes differ")
+	}
+
+	// Oversize rejected.
+	big := base64.StdEncoding.EncodeToString(make([]byte, (15<<20)+1))
+	if !isToolError(callNamed(s, "post_image", map[string]any{
+		"area": "ui", "from": "d", "mime": "image/png", "data": big,
+	})) {
+		t.Fatal("oversize image must be rejected")
+	}
+
+	// Non-image mime rejected.
+	if !isToolError(callNamed(s, "post_image", map[string]any{
+		"area": "ui", "from": "d", "mime": "application/pdf", "data": b64,
+	})) {
+		t.Fatal("non-image mime must be rejected")
 	}
 }

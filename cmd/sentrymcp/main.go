@@ -17,9 +17,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"os"
@@ -29,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"matrixsentry/blob"
 	"matrixsentry/comms"
 	"matrixsentry/memory"
 	"matrixsentry/mokoblinks"
@@ -74,6 +81,7 @@ type server struct {
 	reg       *sentry.Registry // path→id dictionary for real (file-path) accesses
 	mem       *memory.Store    // semantic memory (nil when no embedder is configured)
 	chat      *comms.Store     // agent communication channel
+	blobs     *blob.Store      // content-addressed image bytes (comms image transfer)
 	oauth     *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
 	moko      *mokoblinks.Client
 	tenant    sentry.TenantID
@@ -120,6 +128,19 @@ func main() {
 		os.Exit(1)
 	}
 	s.chat.SetRetention(envInt("SENTRY_COMMS_RETAIN_N", 2000), time.Duration(envInt("SENTRY_COMMS_RETAIN_DAYS", 14))*24*time.Hour)
+
+	s.blobs, err = blob.Open(*dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sentrymcp: init blob store: %v\n", err)
+		os.Exit(1)
+	}
+	// Startup GC: drop orphan blob files no live message references and that
+	// aren't pinned. The journal is untouched.
+	if n, err := s.blobs.Sweep(s.chat.LiveBlobIDs()); err != nil {
+		moko.Warn("blob gc at startup failed", map[string]string{"err": err.Error()})
+	} else if n > 0 {
+		moko.Info("blob gc at startup", map[string]string{"deleted": fmt.Sprint(n)})
+	}
 
 	// Build the token registry from SENTRY_TOKENS_FILE (opt-in multi-tenant).
 	// With no file, only the owner entry exists → identical to single-tenant today.
@@ -611,6 +632,33 @@ func toolList() []map[string]any {
 			},
 		},
 		{
+			"name":        "post_image",
+			"description": "Share an image with other agents on a channel ('area'). Pass the image as base64 in 'data' with its 'mime' (image/*). The bytes are stored server-side; other agents call get_image with the returned # to fetch it. Use 'caption' for a text description, 'target' to direct it at one agent. Max 15 MB.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"area":    map[string]any{"type": "string", "description": "channel name"},
+					"from":    map[string]any{"type": "string", "description": "your agent label"},
+					"data":    map[string]any{"type": "string", "description": "the image bytes, base64-encoded"},
+					"mime":    map[string]any{"type": "string", "description": "image mime type, e.g. image/png, image/jpeg, image/webp"},
+					"caption": map[string]any{"type": "string", "description": "optional text describing the image"},
+					"target":  map[string]any{"type": "string", "description": "optional agent label to direct this at; empty = broadcast"},
+					"w":       map[string]any{"type": "integer", "description": "optional width in px (auto-detected for png/jpeg/gif if omitted)"},
+					"h":       map[string]any{"type": "integer", "description": "optional height in px (auto-detected for png/jpeg/gif if omitted)"},
+				},
+				"required": []any{"area", "from", "data", "mime"},
+			},
+		},
+		{
+			"name":        "get_image",
+			"description": "Fetch an image posted to a channel by its message # (as shown by read/inbox/post_image). Returns the image itself so you can view it. Tenant-scoped.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"seq": map[string]any{"type": "integer", "description": "the image message #"}},
+				"required":   []any{"seq"},
+			},
+		},
+		{
 			"name":        "promote",
 			"description": "Promote a channel message to durable semantic memory (remember), e.g. a decision or an answer worth keeping. The message stays in the channel; a memory is also created.",
 			"inputSchema": map[string]any{
@@ -910,6 +958,62 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			fmt.Fprintf(&b, "(cursor: #%d)", cursor)
 		}
 		return s.toolText(req.ID, b.String())
+	case "post_image":
+		area, _ := strArg(p.Args, "area")
+		from, _ := strArg(p.Args, "from")
+		mime, _ := strArg(p.Args, "mime")
+		dataB64, _ := strArg(p.Args, "data")
+		if area == "" || from == "" || mime == "" || dataB64 == "" {
+			return s.toolErr(req.ID, "provide 'area', 'from', 'mime' and base64 'data'")
+		}
+		if !strings.HasPrefix(mime, "image/") {
+			return s.toolErr(req.ID, "mime must be image/* (got "+mime+")")
+		}
+		raw, err := base64.StdEncoding.DecodeString(dataB64)
+		if err != nil {
+			return s.toolErr(req.ID, "data is not valid base64: "+err.Error())
+		}
+		if len(raw) > 15<<20 {
+			return s.toolErr(req.ID, fmt.Sprintf("image too large: %d bytes (max %d)", len(raw), 15<<20))
+		}
+		sha, err := s.blobs.Put(raw)
+		if err != nil {
+			return s.toolErr(req.ID, "blob store failed: "+err.Error())
+		}
+		w, h := int(uintArg(p.Args, "w")), int(uintArg(p.Args, "h"))
+		if w == 0 && h == 0 {
+			w, h = imageDims(raw)
+		}
+		caption, _ := strArg(p.Args, "caption")
+		target, _ := strArg(p.Args, "target")
+		s.mu.Lock()
+		seq, err := s.chat.PostImage(tenant, comms.MessagePayload{
+			Area: area, From: from, Mime: mime, BlobID: sha,
+			W: w, H: h, Size: len(raw), Text: caption, Target: target,
+		})
+		s.mu.Unlock()
+		if err != nil {
+			return s.toolErr(req.ID, "post_image failed: "+err.Error())
+		}
+		s.moko.Info("post_image", map[string]string{"tenant": fmt.Sprint(tenant), "area": area, "seq": fmt.Sprint(seq), "bytes": fmt.Sprint(len(raw))})
+		return s.toolText(req.ID, fmt.Sprintf("posted image #%d in %s (%s, %dx%d, %d bytes) — fetch with get_image(%d)", seq, area, mime, w, h, len(raw), seq))
+	case "get_image":
+		seq := uintArg(p.Args, "seq")
+		if seq == 0 {
+			return s.toolErr(req.ID, "provide the 'seq' of the image message")
+		}
+		m, ok := s.chat.GetBySeq(tenant, seq)
+		if !ok {
+			return s.toolErr(req.ID, fmt.Sprintf("message #%d not found for this tenant", seq))
+		}
+		if m.BlobID == "" {
+			return s.toolErr(req.ID, fmt.Sprintf("message #%d is not an image", seq))
+		}
+		raw, err := s.blobs.Get(m.BlobID)
+		if err != nil {
+			return s.toolErr(req.ID, "image bytes unavailable (blob "+m.BlobID+"): "+err.Error())
+		}
+		return s.toolImage(req.ID, base64.StdEncoding.EncodeToString(raw), m.Mime, m.Text)
 	case "promote":
 		if s.mem == nil {
 			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
@@ -1090,4 +1194,26 @@ func (s *server) toolText(id json.RawMessage, text string) rpcResp {
 }
 func (s *server) toolErr(id json.RawMessage, text string) rpcResp {
 	return s.ok(id, map[string]any{"content": []map[string]any{{"type": "text", "text": text}}, "isError": true})
+}
+
+// toolImage returns an MCP image content block (base64 + mimeType), optionally
+// preceded by a text caption — the protocol-native way to hand an image to any
+// MCP client, local or remote.
+func (s *server) toolImage(id json.RawMessage, b64, mime, caption string) rpcResp {
+	content := []map[string]any{}
+	if caption != "" {
+		content = append(content, map[string]any{"type": "text", "text": caption})
+	}
+	content = append(content, map[string]any{"type": "image", "data": b64, "mimeType": mime})
+	return s.ok(id, map[string]any{"content": content})
+}
+
+// imageDims best-effort decodes width/height using only stdlib decoders
+// (png/jpeg/gif). Unknown formats (e.g. webp) return 0,0 — no extra deps.
+func imageDims(data []byte) (int, int) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
 }
