@@ -1000,6 +1000,12 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		if !strings.HasPrefix(mime, "image/") {
 			return s.toolErr(req.ID, "mime must be image/* (got "+mime+")")
 		}
+		// Fix 4: cheap encoded-string length pre-check — reject before materialising
+		// the full decoded buffer. base64 expands at ~4/3; for a 15 MiB raw cap the
+		// encoded string cannot legitimately exceed ceil(15<<20/3)*4 plus small slack.
+		if len(dataB64) > ((15<<20)+2)/3*4+16 {
+			return s.toolErr(req.ID, "image too large")
+		}
 		raw, err := base64.StdEncoding.DecodeString(dataB64)
 		if err != nil {
 			return s.toolErr(req.ID, "data is not valid base64: "+err.Error())
@@ -1007,17 +1013,20 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		if len(raw) > 15<<20 {
 			return s.toolErr(req.ID, fmt.Sprintf("image too large: %d bytes (max %d)", len(raw), 15<<20))
 		}
-		sha, err := s.blobs.Put(raw)
-		if err != nil {
-			return s.toolErr(req.ID, "blob store failed: "+err.Error())
-		}
 		w, h := int(uintArg(p.Args, "w")), int(uintArg(p.Args, "h"))
 		if w == 0 && h == 0 {
 			w, h = imageDims(raw)
 		}
 		caption, _ := strArg(p.Args, "caption")
 		target, _ := strArg(p.Args, "target")
+		// Fix 1: Put+PostImage inside one critical section so blob_gc cannot sweep a
+		// just-Put blob before its comms ref is added (no dangling-reference window).
 		s.mu.Lock()
+		sha, err := s.blobs.Put(raw)
+		if err != nil {
+			s.mu.Unlock()
+			return s.toolErr(req.ID, "blob store failed: "+err.Error())
+		}
 		seq, err := s.chat.PostImage(tenant, comms.MessagePayload{
 			Area: area, From: from, Mime: mime, BlobID: sha,
 			W: w, H: h, Size: len(raw), Text: caption, Target: target,
@@ -1064,7 +1073,15 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		}
 		return s.toolText(req.ID, fmt.Sprintf("%s image #%d", verb, seq))
 	case "blob_gc":
+		// Fix 3: gate to owner tenant only — blob GC is an orchestrator operation.
+		if tenant != s.tenant {
+			return s.toolErr(req.ID, "blob_gc is restricted to the owner tenant")
+		}
+		// Fix 1: snapshot+sweep under s.mu so no concurrent post_image can race
+		// (Put happens inside s.mu too, so LiveBlobIDs and Sweep are coherent).
+		s.mu.Lock()
 		n, err := s.blobs.Sweep(s.chat.LiveBlobIDs())
+		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "blob_gc failed: "+err.Error())
 		}

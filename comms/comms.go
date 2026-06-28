@@ -84,7 +84,7 @@ type Store struct {
 	entries   []Message
 	retainN   int           // keep at most the last N messages in the index (0 = off)
 	retainAge time.Duration // drop messages older than this from the index (0 = off)
-	pinned    map[string]bool // blob sha kept from GC regardless of message retention
+	pinned    map[string]map[sentry.TenantID]bool // blob sha → set of tenants who pinned it; kept from GC while any tenant holds a pin
 }
 
 func message(seq uint64, tenant sentry.TenantID, ts int64, p MessagePayload) Message {
@@ -163,7 +163,8 @@ func New(journal *sentry.Store) (*Store, error) {
 	}
 
 	// Pass 3: replay blob pins (seq order → final on/off state wins).
-	s.pinned = map[string]bool{}
+	// Pins are per-(tenant, blobID): r.Tenant is the authoritative tenant for each pin record.
+	s.pinned = map[string]map[sentry.TenantID]bool{}
 	ptype := EventBlobPin
 	if err := journal.Scan(sentry.Filter{Type: &ptype}, func(r sentry.Record) bool {
 		var pp PinPayload
@@ -172,9 +173,15 @@ func New(journal *sentry.Store) (*Store, error) {
 			return false
 		}
 		if pp.On {
-			s.pinned[pp.BlobID] = true
+			if s.pinned[pp.BlobID] == nil {
+				s.pinned[pp.BlobID] = map[sentry.TenantID]bool{}
+			}
+			s.pinned[pp.BlobID][r.Tenant] = true
 		} else {
-			delete(s.pinned, pp.BlobID)
+			delete(s.pinned[pp.BlobID], r.Tenant)
+			if len(s.pinned[pp.BlobID]) == 0 {
+				delete(s.pinned, pp.BlobID)
+			}
 		}
 		return true
 	}); err != nil {
@@ -358,9 +365,10 @@ func (s *Store) Get(tenant sentry.TenantID, area string, seq uint64) (Message, b
 	return Message{}, false
 }
 
-// Pin records a pin (on=true) or unpin (on=false) for a blob sha and updates the
-// in-RAM pinned set. Pins are global (a blob is content-addressed and shared);
-// tenant is recorded for audit only.
+// Pin records a pin (on=true) or unpin (on=false) for a blob sha for this tenant
+// and updates the in-RAM pinned set. Pins are per-(tenant, blobID): a blob is
+// kept from GC if ANY tenant holds a pin on it. Unpinning only removes the
+// calling tenant's pin; other tenants' pins remain in effect.
 func (s *Store) Pin(tenant sentry.TenantID, blobID string, on bool) error {
 	if blobID == "" {
 		return fmt.Errorf("comms: blob id required to pin")
@@ -371,18 +379,25 @@ func (s *Store) Pin(tenant sentry.TenantID, blobID string, on bool) error {
 		return fmt.Errorf("comms: append pin: %w", err)
 	}
 	if s.pinned == nil {
-		s.pinned = map[string]bool{}
+		s.pinned = map[string]map[sentry.TenantID]bool{}
 	}
 	if on {
-		s.pinned[blobID] = true
+		if s.pinned[blobID] == nil {
+			s.pinned[blobID] = map[sentry.TenantID]bool{}
+		}
+		s.pinned[blobID][tenant] = true
 	} else {
-		delete(s.pinned, blobID)
+		delete(s.pinned[blobID], tenant)
+		if len(s.pinned[blobID]) == 0 {
+			delete(s.pinned, blobID)
+		}
 	}
 	return nil
 }
 
 // LiveBlobIDs returns the GC keep-set: every blob referenced by a live image
-// message (across ALL tenants — blobs are shared) plus every pinned sha.
+// message (across ALL tenants — blobs are shared) plus every blob that has at
+// least one tenant's pin still active.
 func (s *Store) LiveBlobIDs() map[string]bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -392,8 +407,10 @@ func (s *Store) LiveBlobIDs() map[string]bool {
 			keep[m.BlobID] = true
 		}
 	}
-	for sha := range s.pinned {
-		keep[sha] = true
+	for sha, tenants := range s.pinned {
+		if len(tenants) > 0 {
+			keep[sha] = true
+		}
 	}
 	return keep
 }

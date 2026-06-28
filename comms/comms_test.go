@@ -266,6 +266,36 @@ func TestLiveBlobIDsAndPin(t *testing.T) {
 	}
 }
 
+// TestPinIsPerTenant verifies that unpinning by one tenant does NOT remove
+// another tenant's pin: a blob is kept as long as ANY tenant pins it.
+func TestPinIsPerTenant(t *testing.T) {
+	st, _ := newTestStore(t)
+
+	// Tenant 1 pins sha X.
+	if err := st.Pin(1, "shaX", true); err != nil {
+		t.Fatalf("tenant 1 Pin: %v", err)
+	}
+	if !st.LiveBlobIDs()["shaX"] {
+		t.Fatal("shaX must be in keep-set after tenant 1 pins it")
+	}
+
+	// Tenant 2 unpins sha X — tenant 1's pin must survive.
+	if err := st.Pin(2, "shaX", false); err != nil {
+		t.Fatalf("tenant 2 unPin: %v", err)
+	}
+	if !st.LiveBlobIDs()["shaX"] {
+		t.Fatal("shaX must remain in keep-set: tenant 1's pin is still active")
+	}
+
+	// Tenant 1 also unpins — now no tenant pins shaX, so it must leave the keep-set.
+	if err := st.Pin(1, "shaX", false); err != nil {
+		t.Fatalf("tenant 1 unPin: %v", err)
+	}
+	if st.LiveBlobIDs()["shaX"] {
+		t.Fatal("shaX must NOT be in keep-set once all tenants have unpinned it")
+	}
+}
+
 func TestClearAreaTombstoneSurvivesReopen(t *testing.T) {
 	st, dir := newTestStore(t)
 	st.Post(1, MessagePayload{Area: "X", From: "a", Text: "x1"})
