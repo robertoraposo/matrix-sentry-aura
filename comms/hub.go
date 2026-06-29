@@ -43,9 +43,9 @@ type subscription struct {
 	ch     chan Nudge
 }
 
-// hub is an in-RAM pub/sub of comms nudges. Its mutex is independent of Store.mu;
-// the only lock order is Store.mu → hub.mu (publish is called from Post under
-// Store.mu; Subscribe/cancel take only hub.mu), so there is no inversion.
+// hub is an in-RAM pub/sub of comms nudges. Its mutex is independent of Store.mu.
+// publish is called from Post/PostImage AFTER Store.mu is released, so the two
+// locks are never held together; Subscribe/cancel take only hub.mu. No inversion.
 type hub struct {
 	mu   sync.Mutex
 	next int
