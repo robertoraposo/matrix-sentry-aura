@@ -248,6 +248,7 @@ func (s *server) serveHTTP(addr string) {
 	mux.HandleFunc("/admin/corpus", s.handleAdminCorpus)
 	mux.HandleFunc("/admin/journal", s.handleAdminJournal)
 	mux.HandleFunc("/admin/comms", s.handleAdminComms)
+	mux.HandleFunc("/comms/subscribe", s.handleCommsSubscribe)
 	mux.HandleFunc("/", s.handleHTTP)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "sentrymcp http: %v\n", err)
@@ -424,6 +425,88 @@ func (s *server) handleAdminComms(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(struct {
 		Messages []msg `json:"messages"`
 	}{Messages: msgs})
+}
+
+// handleCommsSubscribe is an SSE stream that pushes a "nudge" whenever comms
+// activity matching the subscriber's filter (target and/or areas, tenant-scoped)
+// occurs. The nudge is advisory; the client fetches via its normal read/inbox.
+func (s *server) handleCommsSubscribe(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := s.resolveTenant(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	q := r.URL.Query()
+	target := q.Get("target")
+	var areas []string
+	if a := q.Get("areas"); a != "" {
+		areas = strings.Split(a, ",")
+	}
+	if target == "" && len(areas) == 0 {
+		http.Error(w, "provide target and/or areas", http.StatusBadRequest)
+		return
+	}
+	since := parseUintQuery(q.Get("since"))
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher.Flush()
+
+	f := comms.Filter{Tenant: tenant, Target: target, Areas: areas}
+
+	// Subscribe FIRST so no message can fall into the gap between catch-up and
+	// the channel registration. A post in the window either appears in
+	// MatchingSince or arrives on ch — worst case a duplicate nudge, which is
+	// idempotent (the client re-reads from its cursor).
+	ch, cancel := s.chat.Subscribe(f)
+	defer cancel()
+
+	// Catch-up: if anything matching is newer than the client's cursor, nudge once.
+	if latest := s.chat.MatchingSince(f, since); latest > since {
+		writeNudge(w, comms.Nudge{Seq: latest})
+		flusher.Flush()
+	}
+
+	hb := time.NewTicker(25 * time.Second)
+	defer hb.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case n := <-ch:
+			writeNudge(w, n)
+			flusher.Flush()
+		case <-hb.C:
+			if _, err := io.WriteString(w, ":hb\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+// writeNudge emits one SSE "nudge" event with the nudge JSON as data.
+func writeNudge(w io.Writer, n comms.Nudge) {
+	b, _ := json.Marshal(n)
+	fmt.Fprintf(w, "event: nudge\ndata: %s\n\n", b)
+}
+
+// parseUintQuery parses a non-negative integer query value, defaulting to 0.
+func parseUintQuery(s string) uint64 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // truncRunes shortens s to n runes, appending an ellipsis when cut.

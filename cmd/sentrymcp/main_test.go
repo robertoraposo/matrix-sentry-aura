@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -806,5 +807,49 @@ func TestPinSurvivesBlobGC(t *testing.T) {
 	// Pinned blob must remain in the keep-set even though no live message references it.
 	if !s.chat.LiveBlobIDs()[blobOf(t, raw)] {
 		t.Fatal("pinned blob must remain in keep-set after clear")
+	}
+}
+
+// --- SSE /comms/subscribe tests ---
+
+func TestCommsSubscribeSSE(t *testing.T) {
+	s := newMemServer(t) // has s.chat set; open/local mode (no auth)
+
+	// Pre-post a matching message so catch-up has something (since=0).
+	seq, _ := s.chat.Post(s.tenant, comms.MessagePayload{Area: "proj/x", From: "o", Text: "hi", Target: "w"})
+
+	req := httptest.NewRequest("GET", "/comms/subscribe?target=w&areas=proj/x&since=0", nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() { s.handleCommsSubscribe(rec, req); close(done) }()
+
+	// Give the handler a moment to emit the catch-up nudge, then post a live message.
+	time.Sleep(50 * time.Millisecond)
+	live, _ := s.chat.Post(s.tenant, comms.MessagePayload{Area: "proj/x", From: "o", Text: "live", Target: "w"})
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: nudge") {
+		t.Fatalf("no nudge event in stream:\n%s", body)
+	}
+	// Catch-up nudge carries the pre-existing seq; live nudge carries the new seq.
+	if !strings.Contains(body, fmt.Sprintf(`"seq":%d`, seq)) && !strings.Contains(body, fmt.Sprintf(`"seq":%d`, live)) {
+		t.Fatalf("expected a seq (%d or %d) in stream:\n%s", seq, live, body)
+	}
+}
+
+func TestCommsSubscribeMissingFilter(t *testing.T) {
+	s := newMemServer(t)
+	// Missing target and areas → 400.
+	req := httptest.NewRequest("GET", "/comms/subscribe", nil)
+	rec := httptest.NewRecorder()
+	s.handleCommsSubscribe(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing filter: got %d want 400", rec.Code)
 	}
 }
