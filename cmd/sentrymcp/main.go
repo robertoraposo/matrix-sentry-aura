@@ -460,14 +460,18 @@ func (s *server) handleCommsSubscribe(w http.ResponseWriter, r *http.Request) {
 
 	f := comms.Filter{Tenant: tenant, Target: target, Areas: areas}
 
+	// Subscribe FIRST so no message can fall into the gap between catch-up and
+	// the channel registration. A post in the window either appears in
+	// MatchingSince or arrives on ch — worst case a duplicate nudge, which is
+	// idempotent (the client re-reads from its cursor).
+	ch, cancel := s.chat.Subscribe(f)
+	defer cancel()
+
 	// Catch-up: if anything matching is newer than the client's cursor, nudge once.
 	if latest := s.chat.MatchingSince(f, since); latest > since {
 		writeNudge(w, comms.Nudge{Seq: latest})
 		flusher.Flush()
 	}
-
-	ch, cancel := s.chat.Subscribe(f)
-	defer cancel()
 
 	hb := time.NewTicker(25 * time.Second)
 	defer hb.Stop()
@@ -479,7 +483,9 @@ func (s *server) handleCommsSubscribe(w http.ResponseWriter, r *http.Request) {
 			writeNudge(w, n)
 			flusher.Flush()
 		case <-hb.C:
-			io.WriteString(w, ":hb\n\n")
+			if _, err := io.WriteString(w, ":hb\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}
