@@ -85,6 +85,7 @@ type Store struct {
 	retainN   int           // keep at most the last N messages in the index (0 = off)
 	retainAge time.Duration // drop messages older than this from the index (0 = off)
 	pinned    map[string]map[sentry.TenantID]bool // blob sha → set of tenants who pinned it; kept from GC while any tenant holds a pin
+	hub       *hub          // in-RAM nudge pub/sub (wake-on-update); nil-safe via lazy init in New
 }
 
 func message(seq uint64, tenant sentry.TenantID, ts int64, p MessagePayload) Message {
@@ -191,6 +192,7 @@ func New(journal *sentry.Store) (*Store, error) {
 		return nil, scanErr
 	}
 
+	s.hub = newHub()
 	return s, nil
 }
 
@@ -209,8 +211,10 @@ func (s *Store) Post(tenant sentry.TenantID, p MessagePayload) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("comms: append: %w", err)
 	}
-	s.entries = append(s.entries, message(uint64(seq), tenant, time.Now().UnixNano(), p))
-	s.pruneAt(time.Now().UnixNano())
+	ts := time.Now().UnixNano()
+	s.entries = append(s.entries, message(uint64(seq), tenant, ts, p))
+	s.pruneAt(ts)
+	s.hub.publish(message(uint64(seq), tenant, ts, p))
 	return uint64(seq), nil
 }
 
@@ -228,8 +232,10 @@ func (s *Store) PostImage(tenant sentry.TenantID, p MessagePayload) (uint64, err
 	if err != nil {
 		return 0, fmt.Errorf("comms: append image: %w", err)
 	}
-	s.entries = append(s.entries, message(uint64(seq), tenant, time.Now().UnixNano(), p))
-	s.pruneAt(time.Now().UnixNano())
+	ts := time.Now().UnixNano()
+	s.entries = append(s.entries, message(uint64(seq), tenant, ts, p))
+	s.pruneAt(ts)
+	s.hub.publish(message(uint64(seq), tenant, ts, p))
 	return uint64(seq), nil
 }
 
