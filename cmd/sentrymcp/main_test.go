@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -851,5 +852,38 @@ func TestCommsSubscribeMissingFilter(t *testing.T) {
 	s.handleCommsSubscribe(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing filter: got %d want 400", rec.Code)
+	}
+}
+
+func TestHandleDownloadTraversalGuard(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SENTRY_DL_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "foo.bin"), []byte("BINARY"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "install.sh"), []byte("#!/bin/bash\necho hi\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{}
+
+	// legit artifact
+	rec := httptest.NewRecorder()
+	s.handleDownload(rec, httptest.NewRequest("GET", "/dl/foo.bin", nil))
+	if rec.Code != 200 || rec.Body.String() != "BINARY" {
+		t.Fatalf("legit download: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	// traversal + subpath rejected
+	for _, bad := range []string{"/dl/../main.go", "/dl/..%2fx", "/dl/sub/x", "/dl/"} {
+		rec := httptest.NewRecorder()
+		s.handleDownload(rec, httptest.NewRequest("GET", bad, nil))
+		if rec.Code == 200 {
+			t.Fatalf("traversal/bad name %q returned 200 (should be 4xx)", bad)
+		}
+	}
+	// install.sh served
+	rec = httptest.NewRecorder()
+	s.handleInstallScript(rec, httptest.NewRequest("GET", "/install.sh", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "echo hi") {
+		t.Fatalf("install.sh: code=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
