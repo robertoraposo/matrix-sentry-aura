@@ -29,6 +29,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -89,7 +90,7 @@ type server struct {
 	tokens    *tokenRegistry // secret→tenant; owner built-in, teams from SENTRY_TOKENS_FILE
 	logRecall bool           // journal recall queries as EventRecall (SENTRY_RECALL_LOG)
 
-	recallMu   sync.Mutex   // guards recallRing
+	recallMu   sync.Mutex    // guards recallRing
 	recallRing []recallEntry // bounded ring of recent recalls for analyze_recall — O(≤cap), no journal scan
 }
 
@@ -231,6 +232,50 @@ func (s *server) serveStdio() {
 	}
 }
 
+// dlDir is the directory of public release artifacts (install.sh, signed
+// sentry-reflect binaries + .sig). Overridable via SENTRY_DL_DIR.
+func dlDir() string {
+	if d := os.Getenv("SENTRY_DL_DIR"); d != "" {
+		return d
+	}
+	return "/root/sentry-dl"
+}
+
+// handleInstallScript serves the public one-liner installer (no auth).
+func (s *server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
+	b, err := os.ReadFile(filepath.Join(dlDir(), "install.sh"))
+	if err != nil {
+		http.Error(w, "install.sh not available", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(b)
+}
+
+// handleDownload serves a single signed release artifact from dlDir (no auth,
+// read-only). The name is a bare filename — no subpaths or traversal.
+func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/dl/")
+	if name == "" || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		http.Error(w, "bad artifact name", http.StatusBadRequest)
+		return
+	}
+	f, err := os.Open(filepath.Join(dlDir(), name))
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.IsDir() {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeContent(w, r, name, fi.ModTime(), f)
+}
+
 func (s *server) serveHTTP(addr string) {
 	s.token = os.Getenv("SENTRY_MCP_TOKEN") // optional bearer auth
 	mux := http.NewServeMux()
@@ -249,6 +294,8 @@ func (s *server) serveHTTP(addr string) {
 	mux.HandleFunc("/admin/journal", s.handleAdminJournal)
 	mux.HandleFunc("/admin/comms", s.handleAdminComms)
 	mux.HandleFunc("/comms/subscribe", s.handleCommsSubscribe)
+	mux.HandleFunc("/install.sh", s.handleInstallScript)
+	mux.HandleFunc("/dl/", s.handleDownload)
 	mux.HandleFunc("/", s.handleHTTP)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "sentrymcp http: %v\n", err)
@@ -638,7 +685,7 @@ func toolList() []map[string]any {
 					"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional labels for grouping/filtering"},
 					"src":        map[string]any{"type": "string", "description": "optional originating tool or context"},
 					"supersedes": map[string]any{"type": "integer", "description": "optional id of an existing memory this fact updates or corrects; replaces it instead of storing a contradicting duplicate"},
-					"force": map[string]any{"type": "boolean", "description": "store even if a near-duplicate already exists; use only when your fact is genuinely distinct from what recall/remember reports, not a restatement"},
+					"force":      map[string]any{"type": "boolean", "description": "store even if a near-duplicate already exists; use only when your fact is genuinely distinct from what recall/remember reports, not a restatement"},
 				},
 				"required": []any{"text"},
 			},
