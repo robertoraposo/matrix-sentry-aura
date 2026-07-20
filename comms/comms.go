@@ -31,6 +31,14 @@ const EventImage sentry.EventType = 8
 // blob survives GC independently of whether a live message still references it.
 const EventBlobPin sentry.EventType = 9
 
+// EventMessageState is the journal record type for a task-message state change
+// (pending→claimed→done/cancel/overdue). Durable task state is rebuilt on New by
+// replaying these events in seq order, last-wins per (tenant, seq) — the same
+// event-sourced pattern as EventBlobPin. Presence is deliberately NOT a journal
+// event (RAM-only). Old binaries reading a new journal skip unknown type 10, so
+// tasks safely degrade to plain messages (rollback-safe).
+const EventMessageState sentry.EventType = 10
+
 // PinPayload is the persisted pin/unpin of a blob.
 type PinPayload struct {
 	BlobID string `json:"blob"`
@@ -56,6 +64,9 @@ type MessagePayload struct {
 	W      int    `json:"w,omitempty"`
 	H      int    `json:"h,omitempty"`
 	Size   int    `json:"size,omitempty"`
+	// Lifecycle-v2 (additive, omitempty so old records/callers are unaffected):
+	ExpiresAt int64 `json:"exp,omitempty"` // unix nanos; 0 = never. Set from post ttl.
+	Deadline  int64 `json:"dl,omitempty"`  // unix nanos; 0 = none. Only meaningful for kind=task.
 }
 
 // Message is a read result: the payload plus the journal seq (its id), tenant, ts.
@@ -75,6 +86,9 @@ type Message struct {
 	W      int
 	H      int
 	Size   int
+	// Lifecycle-v2 (additive): per-message TTL and per-task deadline (unix nanos).
+	ExpiresAt int64
+	Deadline  int64
 }
 
 // Store is the message log: a journal for durability plus an in-RAM index.
@@ -86,6 +100,11 @@ type Store struct {
 	retainAge time.Duration // drop messages older than this from the index (0 = off)
 	pinned    map[string]map[sentry.TenantID]bool // blob sha → set of tenants who pinned it; kept from GC while any tenant holds a pin
 	hub       *hub          // in-RAM nudge pub/sub (wake-on-update); set by New before first use
+	// Lifecycle-v2 state (all guarded by s.mu):
+	tasks         map[sentry.TenantID]map[uint64]*TaskState // durable task state (rebuilt from EventMessageState)
+	presence      map[sentry.TenantID]map[string]Presence   // ephemeral heartbeat slots, keyed by agent label (never journaled)
+	leaseTTL      time.Duration                             // task-claim lease length
+	presenceStale time.Duration                             // presence slot expiry after last update
 }
 
 func message(seq uint64, tenant sentry.TenantID, ts int64, p MessagePayload) Message {
@@ -93,12 +112,40 @@ func message(seq uint64, tenant sentry.TenantID, ts int64, p MessagePayload) Mes
 		Seq: seq, Tenant: tenant, TS: ts,
 		Area: p.Area, From: p.From, Kind: p.Kind, Text: p.Text, Target: p.Target, Ref: p.Ref,
 		BlobID: p.BlobID, Mime: p.Mime, W: p.W, H: p.H, Size: p.Size,
+		ExpiresAt: p.ExpiresAt, Deadline: p.Deadline,
 	}
+}
+
+// StatePayload is the persisted form of one task-state change (EventMessageState).
+type StatePayload struct {
+	Seq        uint64 `json:"seq"`   // the task message's seq
+	State      string `json:"state"` // pending|claimed|done|cancel|overdue
+	By         string `json:"by,omitempty"`
+	LeaseUntil int64  `json:"lease,omitempty"` // unix nanos
+}
+
+// TaskState is the in-RAM live state of a kind=task message, rebuilt from
+// EventMessageState replay and mutated by Claim/Resolve/the sweeper under s.mu.
+type TaskState struct {
+	State      string // pending|claimed|done|cancel|overdue
+	Holder     string
+	LeaseUntil int64
+	Deadline   int64
+}
+
+// Presence is one agent's ephemeral heartbeat slot: last-status-wins, RAM-only,
+// never journaled, dropped when stale.
+type Presence struct {
+	Agent  string
+	Area   string
+	Status string
+	TS     int64
 }
 
 // New wraps a journal, rebuilding the in-RAM message index from EventMessage records.
 func New(journal *sentry.Store) (*Store, error) {
 	s := &Store{journal: journal}
+	now := time.Now().UnixNano()
 	etype := EventMessage
 	var scanErr error
 	err := journal.Scan(sentry.Filter{Type: &etype}, func(r sentry.Record) bool {
@@ -107,7 +154,11 @@ func New(journal *sentry.Store) (*Store, error) {
 			scanErr = fmt.Errorf("comms: decode record seq %d: %w", r.Seq, err)
 			return false
 		}
-		s.entries = append(s.entries, message(uint64(r.Seq), r.Tenant, r.Tstamp, p))
+		m := message(uint64(r.Seq), r.Tenant, r.Tstamp, p)
+		if s.isExpired(m, now) {
+			return true // already-expired: keep the journal record, skip the index
+		}
+		s.entries = append(s.entries, m)
 		return true
 	})
 	if err != nil {
@@ -125,7 +176,11 @@ func New(journal *sentry.Store) (*Store, error) {
 			scanErr = fmt.Errorf("comms: decode image seq %d: %w", r.Seq, err)
 			return false
 		}
-		s.entries = append(s.entries, message(uint64(r.Seq), r.Tenant, r.Tstamp, p))
+		m := message(uint64(r.Seq), r.Tenant, r.Tstamp, p)
+		if s.isExpired(m, now) {
+			return true // already-expired: keep the journal record, skip the index
+		}
+		s.entries = append(s.entries, m)
 		return true
 	}); err != nil {
 		return nil, err
@@ -192,8 +247,16 @@ func New(journal *sentry.Store) (*Store, error) {
 		return nil, scanErr
 	}
 
+	s.tasks = map[sentry.TenantID]map[uint64]*TaskState{}
+	s.presence = map[sentry.TenantID]map[string]Presence{}
 	s.hub = newHub()
 	return s, nil
+}
+
+// isExpired reports whether message m has a TTL that has already passed at now
+// (unix nanos). Messages with no TTL (ExpiresAt == 0) never expire.
+func (s *Store) isExpired(m Message, now int64) bool {
+	return m.ExpiresAt > 0 && now > m.ExpiresAt
 }
 
 // Post appends a message to area for tenant and returns its journal seq (its id).
@@ -339,24 +402,37 @@ func (s *Store) SetRetention(n int, age time.Duration) {
 }
 
 // pruneAt drops index entries failing either retention knob. Caller holds s.mu.
+// retainN is now enforced PER TENANT (keep each tenant's last N by seq) so a noisy
+// tenant can no longer evict a quiet tenant's live messages; the age bound is
+// unchanged (global, since TS is comparable across tenants). entries stays
+// seq-ascending: we mark keeps walking newest→oldest, then rebuild in order.
 func (s *Store) pruneAt(now int64) {
 	if s.retainN <= 0 && s.retainAge <= 0 {
 		return
-	}
-	start := 0
-	if s.retainN > 0 && len(s.entries) > s.retainN {
-		start = len(s.entries) - s.retainN
 	}
 	var cutoff int64
 	if s.retainAge > 0 {
 		cutoff = now - int64(s.retainAge)
 	}
-	out := make([]Message, 0, len(s.entries)-start)
-	for _, m := range s.entries[start:] {
+	// Count kept-per-tenant walking newest→oldest so the tail (highest seq) wins.
+	perTenant := map[sentry.TenantID]int{}
+	keep := make([]bool, len(s.entries))
+	for i := len(s.entries) - 1; i >= 0; i-- {
+		m := s.entries[i]
 		if cutoff > 0 && m.TS < cutoff {
 			continue
 		}
-		out = append(out, m)
+		if s.retainN > 0 && perTenant[m.Tenant] >= s.retainN {
+			continue
+		}
+		perTenant[m.Tenant]++
+		keep[i] = true
+	}
+	out := s.entries[:0]
+	for i, m := range s.entries {
+		if keep[i] {
+			out = append(out, m)
+		}
 	}
 	s.entries = out
 }
