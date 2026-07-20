@@ -50,6 +50,19 @@ func (s *Store) PresenceList(tenant sentry.TenantID) []Presence {
 	return out
 }
 
+// SetPresenceStale sets how long a presence slot survives without a fresh
+// heartbeat before the sweeper drops it (wired from SENTRY_COMMS_PRESENCE_STALE_SEC
+// at startup). A non-positive d leaves the current value; a zero presenceStale
+// disables staleness entirely (pruneStalePresenceLocked never evicts).
+func (s *Store) SetPresenceStale(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.presenceStale = d
+}
+
 // pruneStalePresenceLocked deletes every presence slot last updated more than
 // presenceStale before now (unix nanos). Caller holds s.mu (invoked by the
 // sweeper each tick). A non-positive presenceStale disables the knob (no slot is

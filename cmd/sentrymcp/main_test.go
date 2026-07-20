@@ -974,6 +974,50 @@ func TestLifecycleToolsListed(t *testing.T) {
 	}
 }
 
+// --- lifecycle-v2 render (Task 6): presence section + task-state suffix in read/inbox ---
+
+func TestReadShowsPresenceAndTaskState(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	// A heartbeat populates a presence slot (no channel message).
+	respText(t, callNamed(s, "heartbeat", map[string]any{"from": "worker-2", "status": "building", "area": "proj/x"}))
+	// A claimed task should render its live state as a suffix.
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task"})
+	seq := extractSeq(t, post)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "worker-2"}))
+
+	txt := respText(t, callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0}))
+	if !strings.Contains(txt, "~ worker-2") {
+		t.Fatalf("read should prepend a presence line for worker-2:\n%s", txt)
+	}
+	if !strings.Contains(txt, "⟨claimed by worker-2") {
+		t.Fatalf("read should append the ⟨claimed by …⟩ task-state suffix:\n%s", txt)
+	}
+	// inbox (directed) renders the same way.
+	respText(t, callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "for you", "kind": "task", "target": "worker-2"}))
+	inbox := respText(t, callNamed(s, "inbox", map[string]any{"target": "worker-2"}))
+	if !strings.Contains(inbox, "~ worker-2") {
+		t.Fatalf("inbox should prepend a presence line:\n%s", inbox)
+	}
+}
+
+func TestReadBackwardCompatPlainMessage(t *testing.T) {
+	s := newMemServer(t)
+	// A plain note with no presence and no task state must render byte-identical to v1.
+	seq, err := s.chat.Post(s.tenant, comms.MessagePayload{Area: "proj/x", From: "be", Text: "schema ready", Kind: "note"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt := respText(t, callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0}))
+	exact := fmt.Sprintf("#%d [note] be→all: schema ready\n(cursor: #%d)", seq, seq)
+	if txt != exact {
+		t.Fatalf("plain render not byte-identical to v1:\n got: %q\nwant: %q", txt, exact)
+	}
+	if strings.Contains(txt, "~ ") || strings.Contains(txt, "⟨") {
+		t.Fatalf("plain render must carry no presence/task markers:\n%s", txt)
+	}
+}
+
 func TestHandleDownloadTraversalGuard(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SENTRY_DL_DIR", dir)

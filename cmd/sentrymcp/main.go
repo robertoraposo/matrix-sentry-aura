@@ -18,6 +18,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -129,6 +130,17 @@ func main() {
 		os.Exit(1)
 	}
 	s.chat.SetRetention(envInt("SENTRY_COMMS_RETAIN_N", 2000), time.Duration(envInt("SENTRY_COMMS_RETAIN_DAYS", 14))*24*time.Hour)
+	// Lifecycle-v2: claim lease length, presence staleness, owner override label,
+	// and the eager sweeper (all defaulted; each knob is backward-compatible).
+	s.chat.SetLeaseTTL(time.Duration(envInt("SENTRY_COMMS_LEASE_MIN", 15)) * time.Minute)
+	s.chat.SetPresenceStale(time.Duration(envInt("SENTRY_COMMS_PRESENCE_STALE_SEC", 900)) * time.Second)
+	s.chat.SetOwnerLabel(envOr("SENTRY_COMMS_OWNER_LABEL", ""))
+	// Sweeper on the process lifecycle context: eager lease/deadline/TTL/presence
+	// expiry even in a quiet channel. Nudges publish AFTER s.mu is released (Start
+	// preserves the lock-order invariant). Cancelled when main returns.
+	sweepCtx, cancelSweep := context.WithCancel(context.Background())
+	defer cancelSweep()
+	s.chat.Start(sweepCtx, time.Duration(envInt("SENTRY_COMMS_SWEEP_SEC", 30))*time.Second)
 
 	s.blobs, err = blob.Open(*dir)
 	if err != nil {
@@ -1104,7 +1116,11 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		if len(msgs) > readCap {
 			msgs = msgs[len(msgs)-readCap:]
 		}
+		now := time.Now()
 		var b strings.Builder
+		// Lifecycle-v2: prepend a compact presence section (nothing when no live
+		// agents → byte-identical to v1) before the message lines.
+		writePresence(&b, s.chat.PresenceList(tenant), now)
 		var last uint64 = since
 		n := 0
 		for _, m := range msgs {
@@ -1118,7 +1134,13 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			if m.BlobID != "" {
 				fmt.Fprintf(&b, "#%d [image] %s→%s: %s [%s %dx%d %dB · get_image(%d)]\n", m.Seq, m.From, to, m.Text, m.Mime, m.W, m.H, m.Size, m.Seq)
 			} else {
-				fmt.Fprintf(&b, "#%d [%s] %s→%s: %s\n", m.Seq, m.Kind, m.From, to, m.Text)
+				// Task messages gain a live-state suffix; non-tasks (TaskOf ok=false)
+				// render byte-identical to v1.
+				fmt.Fprintf(&b, "#%d [%s] %s→%s: %s", m.Seq, m.Kind, m.From, to, m.Text)
+				if ts, ok := s.chat.TaskOf(tenant, m.Seq); ok {
+					b.WriteString(taskSuffix(ts))
+				}
+				b.WriteByte('\n')
 			}
 			if m.Seq > last {
 				last = m.Seq
@@ -1126,7 +1148,9 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			n++
 		}
 		if n == 0 {
-			return s.toolText(req.ID, fmt.Sprintf("no new messages in %s since #%d", area, since))
+			// No new messages: keep v1's exact text, only prefixed by presence (if any).
+			fmt.Fprintf(&b, "no new messages in %s since #%d", area, since)
+			return s.toolText(req.ID, b.String())
 		}
 		fmt.Fprintf(&b, "(cursor: #%d)", last)
 		return s.toolText(req.ID, b.String())
@@ -1150,7 +1174,10 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			inboxSince = uint64(v)
 		}
 		msgs := s.chat.Inbox(tenant, target, inboxSince)
+		now := time.Now()
 		var b strings.Builder
+		// Lifecycle-v2: prepend the presence section (empty → byte-identical to v1).
+		writePresence(&b, s.chat.PresenceList(tenant), now)
 		if len(msgs) == 0 {
 			fmt.Fprintf(&b, "inbox empty for %q (since #%d)", target, inboxSince)
 		} else {
@@ -1164,7 +1191,11 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 				if m.BlobID != "" {
 					fmt.Fprintf(&b, "#%d [image] %s→%s @%s: %s [%s %dx%d · get_image(%d)]\n", m.Seq, m.From, tgt, m.Area, m.Text, m.Mime, m.W, m.H, m.Seq)
 				} else {
-					fmt.Fprintf(&b, "#%d [%s] %s→%s @%s: %s\n", m.Seq, m.Kind, m.From, tgt, m.Area, m.Text)
+					fmt.Fprintf(&b, "#%d [%s] %s→%s @%s: %s", m.Seq, m.Kind, m.From, tgt, m.Area, m.Text)
+					if ts, ok := s.chat.TaskOf(tenant, m.Seq); ok {
+						b.WriteString(taskSuffix(ts))
+					}
+					b.WriteByte('\n')
 				}
 				if m.Seq > cursor {
 					cursor = m.Seq
@@ -1345,6 +1376,74 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		return s.toolText(req.ID, fmt.Sprintf("journal holds %d events", s.store.ReadNextSeq()-1))
 	default:
 		return s.toolErr(req.ID, "unknown tool: "+p.Name)
+	}
+}
+
+// writePresence prepends the lifecycle-v2 presence section to b — one line per
+// live agent: "~ <agent> [<area>]: <status> (<age>)". The bracketed area is
+// omitted when empty. Nothing is written when there are no live slots, so a
+// channel with no presence renders byte-identical to v1.
+func writePresence(b *strings.Builder, slots []comms.Presence, now time.Time) {
+	for _, p := range slots {
+		b.WriteString("~ ")
+		b.WriteString(p.Agent)
+		if p.Area != "" {
+			b.WriteString(" [")
+			b.WriteString(p.Area)
+			b.WriteByte(']')
+		}
+		b.WriteString(": ")
+		b.WriteString(p.Status)
+		fmt.Fprintf(b, " (%s)\n", compactAge(now.UnixNano()-p.TS))
+	}
+}
+
+// taskSuffix renders a task message's live-state suffix, e.g.
+//
+//	"  ⟨claimed by backend-2 · lease 12:40 · due 12:55⟩"
+//
+// It is appended to a task's message line by read/inbox. A zero/empty state
+// yields "" so non-task messages (TaskOf ok=false, or a never-seeded seq) render
+// byte-identical to v1. claimed/overdue show holder + lease; pending/done/cancel
+// show the bare state; a deadline is appended for any non-terminal task.
+func taskSuffix(ts comms.TaskState) string {
+	if ts.State == "" {
+		return ""
+	}
+	var parts []string
+	switch ts.State {
+	case "claimed", "overdue":
+		if ts.Holder != "" {
+			parts = append(parts, ts.State+" by "+ts.Holder)
+		} else {
+			parts = append(parts, ts.State)
+		}
+		if ts.LeaseUntil > 0 {
+			parts = append(parts, "lease "+time.Unix(0, ts.LeaseUntil).Format("15:04"))
+		}
+	default: // pending, done, cancel
+		parts = append(parts, ts.State)
+	}
+	if ts.Deadline > 0 && ts.State != "done" && ts.State != "cancel" {
+		parts = append(parts, "due "+time.Unix(0, ts.Deadline).Format("15:04"))
+	}
+	return "  ⟨" + strings.Join(parts, " · ") + "⟩"
+}
+
+// compactAge renders a nanosecond age as a short human string (0s, 45s, 12m, 3h).
+// A negative age (clock skew) clamps to 0s.
+func compactAge(ns int64) string {
+	d := time.Duration(ns)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 }
 

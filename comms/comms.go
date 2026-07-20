@@ -413,7 +413,9 @@ func (s *Store) Recent(tenant sentry.TenantID, limit int) []Message {
 
 // SetRetention bounds the in-RAM index: keep only messages BOTH within the last n
 // (0 = off) AND newer than age (0 = off). The journal is untouched (audit).
-// Applied here and after every Post. Global across tenants (RAM bound).
+// Applied here, after every Post, and each sweeper tick. n is enforced PER TENANT
+// (each tenant keeps its own last n by seq, so a noisy tenant cannot evict a quiet
+// tenant's live messages); the age bound is global (TS is comparable across tenants).
 func (s *Store) SetRetention(n int, age time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
