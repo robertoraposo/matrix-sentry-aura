@@ -855,6 +855,125 @@ func TestCommsSubscribeMissingFilter(t *testing.T) {
 	}
 }
 
+// --- lifecycle-v2 MCP tools (Task 5): post ttl/deadline + claim/resolve/heartbeat ---
+
+func TestPostTTLSetsExpiry(t *testing.T) {
+	s := newMemServer(t)
+	now := time.Now()
+	resp := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "be", "text": "ephemeral", "ttl": "10m"})
+	seq := extractSeq(t, resp)
+	m, ok := s.chat.GetBySeq(s.tenant, seq)
+	if !ok {
+		t.Fatalf("message #%d not found after post", seq)
+	}
+	if m.ExpiresAt == 0 {
+		t.Fatal("ttl=10m did not set ExpiresAt")
+	}
+	want := now.Add(10 * time.Minute).UnixNano()
+	if diff := m.ExpiresAt - want; diff < -int64(time.Minute) || diff > int64(time.Minute) {
+		t.Fatalf("ExpiresAt = %d, want ≈ %d (diff %v)", m.ExpiresAt, want, time.Duration(diff))
+	}
+}
+
+func TestClaimToolAtomic(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task"})
+	seq := extractSeq(t, post)
+
+	a := respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"}))
+	if !strings.Contains(a, "claimed") {
+		t.Fatalf("A's claim should succeed: %s", a)
+	}
+	// B's claim of a live-leased task is a normal (non-error) DENIED text.
+	b := respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "B"}))
+	if !strings.Contains(b, "DENIED") {
+		t.Fatalf("B's claim of a held task should be DENIED: %s", b)
+	}
+}
+
+func TestResolveTool(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "do it", "kind": "task"})
+	seq := extractSeq(t, post)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"}))
+
+	r := respText(t, callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "A", "state": "done"}))
+	if !strings.Contains(r, "resolved") {
+		t.Fatalf("holder resolve should succeed: %s", r)
+	}
+	// A resolved task is terminal → further claim DENIED.
+	b := respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "B"}))
+	if !strings.Contains(b, "DENIED") {
+		t.Fatalf("claim after resolve should be DENIED (terminal): %s", b)
+	}
+	// non-holder resolve is a tool error.
+	if !isToolError(callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "C"})) {
+		t.Fatal("non-holder resolve should be a tool error")
+	}
+}
+
+func TestHeartbeatToolNoMessage(t *testing.T) {
+	s := newMemServer(t)
+	before := len(s.chat.Recent(s.tenant, 0))
+	txt := respText(t, callNamed(s, "heartbeat", map[string]any{"from": "worker-1", "status": "building", "area": "proj/x"}))
+	if !strings.Contains(txt, "presence updated") {
+		t.Fatalf("heartbeat response: %s", txt)
+	}
+	if after := len(s.chat.Recent(s.tenant, 0)); after != before {
+		t.Fatalf("heartbeat created a message: before=%d after=%d", before, after)
+	}
+	if got := s.chat.PresenceList(s.tenant); len(got) != 1 || got[0].Status != "building" {
+		t.Fatalf("presence slot not set correctly: %+v", got)
+	}
+}
+
+func TestDurArg(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	// absent → none
+	if v, ok, err := durArg(map[string]any{}, "ttl", now); err != nil || ok || v != 0 {
+		t.Fatalf("absent: (%d,%v,%v), want (0,false,nil)", v, ok, err)
+	}
+	// empty string → none
+	if v, ok, err := durArg(map[string]any{"ttl": ""}, "ttl", now); err != nil || ok || v != 0 {
+		t.Fatalf("empty: (%d,%v,%v), want (0,false,nil)", v, ok, err)
+	}
+	for _, c := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"90s", 90 * time.Second},
+		{"10m", 10 * time.Minute},
+		{"2h", 2 * time.Hour},
+		{"5", 5 * time.Second}, // bare integer = seconds
+	} {
+		v, ok, err := durArg(map[string]any{"ttl": c.in}, "ttl", now)
+		if err != nil || !ok {
+			t.Fatalf("%q: (%d,%v,%v), want (abs,true,nil)", c.in, v, ok, err)
+		}
+		if want := now.Add(c.want).UnixNano(); v != want {
+			t.Fatalf("%q: v=%d want=%d", c.in, v, want)
+		}
+	}
+	// junk → error, never a silent 0
+	if v, ok, err := durArg(map[string]any{"ttl": "nope"}, "ttl", now); err == nil || ok || v != 0 {
+		t.Fatalf("junk: (%d,%v,%v), want (0,false,err)", v, ok, err)
+	}
+}
+
+func TestLifecycleToolsListed(t *testing.T) {
+	names := map[string]bool{}
+	for _, tl := range toolList() {
+		names[tl["name"].(string)] = true
+	}
+	for _, want := range []string{"claim", "resolve", "heartbeat"} {
+		if !names[want] {
+			t.Fatalf("tool %q not advertised in tools/list", want)
+		}
+	}
+}
+
 func TestHandleDownloadTraversalGuard(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SENTRY_DL_DIR", dir)

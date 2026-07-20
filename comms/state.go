@@ -111,6 +111,20 @@ func (s *Store) SetOwnerLabel(label string) {
 	s.ownerLabel = label
 }
 
+// SetLeaseTTL sets the task-claim lease length applied by Claim (the window a
+// holder keeps a task before an un-renewed lease expires and the sweeper frees
+// it). A non-positive d leaves the current value. Wired from SENTRY_COMMS_LEASE_MIN
+// at startup; a zero lease would make every claim instantly stealable, so the MCP
+// server must set this before the claim tool is useful.
+func (s *Store) SetLeaseTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.leaseTTL = d
+}
+
 // appendStateLocked journals one EventMessageState change. The caller MUST hold
 // s.mu and MUST mutate the in-RAM tasks map only after this returns nil, so RAM
 // never runs ahead of the durable journal. (comms.mu → journal.mu is the same

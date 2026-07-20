@@ -715,16 +715,18 @@ func toolList() []map[string]any {
 		},
 		{
 			"name":        "post",
-			"description": "Post a message to a shared agent channel ('area') so other agents working the same project see it. Use kind=question to ask, kind=answer to reply (set ref to the question's #), kind=info to share, target to direct it at a specific agent (else broadcast).",
+			"description": "Post a message to a shared agent channel ('area') so other agents working the same project see it. Use kind=question to ask, kind=answer to reply (set ref to the question's #), kind=info to share, kind=task for a claimable unit of work (claim/resolve it), target to direct it at a specific agent (else broadcast). Optional ttl expires an ephemeral message; deadline (kind=task) flags it overdue when passed.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"area":   map[string]any{"type": "string", "description": "channel name, e.g. 'projX/backend' (agents agree on names)"},
-					"from":   map[string]any{"type": "string", "description": "your agent label, e.g. 'backend' or '01-core'"},
-					"text":   map[string]any{"type": "string", "description": "the message"},
-					"kind":   map[string]any{"type": "string", "description": "question | answer | info | note (default note)"},
-					"target": map[string]any{"type": "string", "description": "optional agent label to direct this at; empty = broadcast"},
-					"ref":    map[string]any{"type": "integer", "description": "optional message # this replies to"},
+					"area":     map[string]any{"type": "string", "description": "channel name, e.g. 'projX/backend' (agents agree on names)"},
+					"from":     map[string]any{"type": "string", "description": "your agent label, e.g. 'backend' or '01-core'"},
+					"text":     map[string]any{"type": "string", "description": "the message"},
+					"kind":     map[string]any{"type": "string", "description": "question | answer | info | note | task (default note)"},
+					"target":   map[string]any{"type": "string", "description": "optional agent label to direct this at; empty = broadcast"},
+					"ref":      map[string]any{"type": "integer", "description": "optional message # this replies to"},
+					"ttl":      map[string]any{"type": "string", "description": "optional lifetime as a duration ('90s', '10m', '2h', or integer seconds); the message drops out of the channel after it (journal is retained)"},
+					"deadline": map[string]any{"type": "string", "description": "optional deadline for a kind=task as a duration from now ('10m', '2h', integer seconds); the task flags overdue once passed"},
 				},
 				"required": []any{"area", "from", "text"},
 			},
@@ -824,6 +826,44 @@ func toolList() []map[string]any {
 					"tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "optional tags for the memory"},
 				},
 				"required": []any{"area", "seq"},
+			},
+		},
+		{
+			"name":        "claim",
+			"description": "Claim a task message (kind=task) so exactly one agent holds it. Atomic: the first caller wins; a second claim while the lease is live is DENIED. Re-claiming as the current holder renews the lease (doubles as a 'still working' heartbeat). An un-renewed lease auto-expires so hung tasks free up.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"seq": map[string]any{"type": "integer", "description": "the task message # to claim"},
+					"by":  map[string]any{"type": "string", "description": "your agent label — becomes the holder"},
+				},
+				"required": []any{"seq", "by"},
+			},
+		},
+		{
+			"name":        "resolve",
+			"description": "Close a task you hold as done or cancel. Only the current holder (or the tenant owner) may resolve; a resolved task rejects further claims.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"seq":   map[string]any{"type": "integer", "description": "the task message # to resolve"},
+					"by":    map[string]any{"type": "string", "description": "your agent label — must be the holder (or owner)"},
+					"state": map[string]any{"type": "string", "description": "done | cancel (default done)"},
+				},
+				"required": []any{"seq", "by"},
+			},
+		},
+		{
+			"name":        "heartbeat",
+			"description": "Update your ephemeral presence slot (last-status-wins) instead of posting a STANDBY message. Creates NO channel message and is never journaled; read/inbox show live agents from these slots. Send periodically; the slot goes stale and disappears if you stop.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"from":   map[string]any{"type": "string", "description": "your agent label"},
+					"status": map[string]any{"type": "string", "description": "what you're doing, e.g. 'building', 'idle', 'running tests'"},
+					"area":   map[string]any{"type": "string", "description": "optional channel you're working in"},
+				},
+				"required": []any{"from", "status"},
 			},
 		},
 		{
@@ -1032,8 +1072,20 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		kind, _ := strArg(p.Args, "kind")
 		target, _ := strArg(p.Args, "target")
 		ref := uintArg(p.Args, "ref")
+		// Lifecycle-v2: optional ttl (→ExpiresAt) and deadline (→Deadline), both
+		// relative durations resolved to absolute unix-nanos from now. Invalid
+		// values are a tool error, never a silent never-expires.
+		now := time.Now()
+		exp, _, ttlErr := durArg(p.Args, "ttl", now)
+		if ttlErr != nil {
+			return s.toolErr(req.ID, "invalid ttl: "+ttlErr.Error())
+		}
+		dl, _, dlErr := durArg(p.Args, "deadline", now)
+		if dlErr != nil {
+			return s.toolErr(req.ID, "invalid deadline: "+dlErr.Error())
+		}
 		s.mu.Lock()
-		seq, err := s.chat.Post(tenant, comms.MessagePayload{Area: area, From: from, Kind: kind, Text: text, Target: target, Ref: ref})
+		seq, err := s.chat.Post(tenant, comms.MessagePayload{Area: area, From: from, Kind: kind, Text: text, Target: target, Ref: ref, ExpiresAt: exp, Deadline: dl})
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "post failed: "+err.Error())
@@ -1121,6 +1173,51 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			fmt.Fprintf(&b, "(cursor: #%d)", cursor)
 		}
 		return s.toolText(req.ID, b.String())
+	case "claim":
+		seq := uintArg(p.Args, "seq")
+		by, _ := strArg(p.Args, "by")
+		if seq == 0 || by == "" {
+			return s.toolErr(req.ID, "provide 'seq' and 'by' to claim")
+		}
+		ts, ok, err := s.chat.Claim(tenant, seq, by, time.Now())
+		if err != nil {
+			return s.toolErr(req.ID, "claim failed: "+err.Error())
+		}
+		if !ok {
+			// DENIED is a normal outcome (someone else holds a live lease), not a
+			// tool error — report who holds it and until when.
+			s.moko.Info("claim", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "ok": "false", "holder": ts.Holder})
+			return s.toolText(req.ID, fmt.Sprintf("DENIED: #%d held by %s until %s", seq, ts.Holder, time.Unix(0, ts.LeaseUntil).Format("15:04")))
+		}
+		s.moko.Info("claim", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "ok": "true"})
+		return s.toolText(req.ID, fmt.Sprintf("claimed #%d by %s, lease until %s", seq, by, time.Unix(0, ts.LeaseUntil).Format("15:04")))
+	case "resolve":
+		seq := uintArg(p.Args, "seq")
+		by, _ := strArg(p.Args, "by")
+		if seq == 0 || by == "" {
+			return s.toolErr(req.ID, "provide 'seq' and 'by' to resolve")
+		}
+		state, _ := strArg(p.Args, "state")
+		if state == "" {
+			state = "done"
+		}
+		if err := s.chat.Resolve(tenant, seq, by, state, time.Now()); err != nil {
+			return s.toolErr(req.ID, "resolve failed: "+err.Error())
+		}
+		s.moko.Info("resolve", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "state": state})
+		return s.toolText(req.ID, fmt.Sprintf("resolved #%d as %s", seq, state))
+	case "heartbeat":
+		from, _ := strArg(p.Args, "from")
+		status, _ := strArg(p.Args, "status")
+		if from == "" || status == "" {
+			return s.toolErr(req.ID, "provide 'from' and 'status' to heartbeat")
+		}
+		area, _ := strArg(p.Args, "area")
+		if err := s.chat.Heartbeat(tenant, from, area, status, time.Now()); err != nil {
+			return s.toolErr(req.ID, "heartbeat failed: "+err.Error())
+		}
+		s.moko.Info("heartbeat", map[string]string{"tenant": fmt.Sprint(tenant), "from": from, "area": area})
+		return s.toolText(req.ID, fmt.Sprintf("presence updated for %s", from))
 	case "post_image":
 		area, _ := strArg(p.Args, "area")
 		from, _ := strArg(p.Args, "from")
@@ -1386,6 +1483,61 @@ func pathArgs(args map[string]any) []string {
 		}
 	}
 	return out
+}
+
+// parseDur parses the lifecycle-v2 duration grammar: a bare integer is seconds
+// ("5" = 5s); otherwise the standard suffixed form ("90s", "10m", "2h", "1h30m").
+// Junk is an error so an invalid ttl/deadline is never silently treated as 0.
+func parseDur(s string) (time.Duration, error) {
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q (use 90s, 10m, 2h, or integer seconds)", s)
+	}
+	return d, nil
+}
+
+// durArg reads the ttl/deadline arg (a relative duration) and returns it as an
+// ABSOLUTE unix-nanos deadline from now. Absent or "" → (0, false, nil) meaning
+// "no expiry". A duration string ("90s"/"10m"/"2h") or a bare/JSON integer of
+// seconds → (now+dur, true, nil). Anything unparseable → (0, false, error) so a
+// bad value surfaces as a tool error instead of a silent never-expires.
+func durArg(args map[string]any, key string, now time.Time) (int64, bool, error) {
+	raw, present := args[key]
+	if !present {
+		return 0, false, nil
+	}
+	var d time.Duration
+	switch v := raw.(type) {
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, false, nil
+		}
+		var err error
+		if d, err = parseDur(s); err != nil {
+			return 0, false, err
+		}
+	case float64:
+		if v <= 0 {
+			return 0, false, nil
+		}
+		d = time.Duration(v) * time.Second
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, false, fmt.Errorf("invalid duration for %q: %v", key, err)
+		}
+		if n <= 0 {
+			return 0, false, nil
+		}
+		d = time.Duration(n) * time.Second
+	default:
+		return 0, false, fmt.Errorf("%q must be a duration string (90s|10m|2h) or integer seconds", key)
+	}
+	return now.Add(d).UnixNano(), true, nil
 }
 
 func (s *server) ok(id json.RawMessage, result any) rpcResp {
