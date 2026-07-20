@@ -1050,3 +1050,137 @@ func TestHandleDownloadTraversalGuard(t *testing.T) {
 		t.Fatalf("install.sh: code=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
+
+// --- lifecycle-v2 acceptance surfaces (deadline-scope, overdue render, owner
+// override, presence dedup) exercised through the MCP tool + render paths ---
+
+// TestPostDeadlineOnlyForTask pins the spec: a deadline is recorded ONLY for
+// kind=task. A kind=note post carrying a deadline must store Deadline==0, while
+// the same deadline on a kind=task post is resolved to an absolute nanos ≈ now+d.
+func TestPostDeadlineOnlyForTask(t *testing.T) {
+	s := newMemServer(t)
+	now := time.Now()
+
+	// kind=note + deadline → Deadline NOT recorded.
+	noteSeq := extractSeq(t, callNamed(s, "post", map[string]any{
+		"area": "proj/x", "from": "be", "text": "just a note", "kind": "note", "deadline": "5m",
+	}))
+	nm, ok := s.chat.GetBySeq(s.tenant, noteSeq)
+	if !ok {
+		t.Fatalf("note #%d not found after post", noteSeq)
+	}
+	if nm.Deadline != 0 {
+		t.Fatalf("kind=note must not record a deadline, got Deadline=%d", nm.Deadline)
+	}
+
+	// kind=task + the same deadline → Deadline ≈ now+5m.
+	taskSeq := extractSeq(t, callNamed(s, "post", map[string]any{
+		"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task", "deadline": "5m",
+	}))
+	tm, ok := s.chat.GetBySeq(s.tenant, taskSeq)
+	if !ok {
+		t.Fatalf("task #%d not found after post", taskSeq)
+	}
+	want := now.Add(5 * time.Minute).UnixNano()
+	if diff := tm.Deadline - want; diff < -int64(time.Minute) || diff > int64(time.Minute) {
+		t.Fatalf("kind=task Deadline = %d, want ≈ %d (diff %v)", tm.Deadline, want, time.Duration(diff))
+	}
+}
+
+// TestReadRendersOverdueTask drives a past-deadline task to overdue via the eager
+// sweeper and asserts BOTH read and inbox render the overdue task-state suffix.
+func TestReadRendersOverdueTask(t *testing.T) {
+	s := newMemServer(t)
+	// Post directly so we can set an absolute PAST deadline — the post tool accepts
+	// only forward-relative durations. Target lets the same message serve inbox too.
+	past := time.Now().Add(-time.Hour).UnixNano()
+	seq, err := s.chat.Post(s.tenant, comms.MessagePayload{
+		Area: "proj/x", From: "lead", Text: "late task", Kind: "task",
+		Target: "worker-9", Deadline: past,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// sweepOnce is unexported (package comms); drive the exported eager sweeper on a
+	// fast tick until it flips the past-deadline task to overdue, then stop it (an
+	// overdue task is not re-flipped, so its state stays stable for the assertions).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.chat.Start(ctx, time.Millisecond)
+	until := time.Now().Add(2 * time.Second)
+	for {
+		if ts, ok := s.chat.TaskOf(s.tenant, seq); ok && ts.State == "overdue" {
+			break
+		}
+		if time.Now().After(until) {
+			t.Fatalf("task #%d never became overdue", seq)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	rd := respText(t, callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0}))
+	if !strings.Contains(rd, "overdue") {
+		t.Fatalf("read should render the overdue task-state suffix:\n%s", rd)
+	}
+	ib := respText(t, callNamed(s, "inbox", map[string]any{"target": "worker-9"}))
+	if !strings.Contains(ib, "overdue") {
+		t.Fatalf("inbox should render the overdue task-state suffix:\n%s", ib)
+	}
+}
+
+// TestResolveOwnerOverrideViaTool covers the SENTRY_COMMS_OWNER_LABEL override
+// through the resolve tool: the owner label may resolve a task it does not hold,
+// while a non-owner non-holder is rejected.
+func TestResolveOwnerOverrideViaTool(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	s.chat.SetOwnerLabel("alvin") // mirrors envOr("SENTRY_COMMS_OWNER_LABEL", "") at startup
+
+	seq := extractSeq(t, callNamed(s, "post", map[string]any{
+		"area": "proj/x", "from": "lead", "text": "stuck task", "kind": "task",
+	}))
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"}))
+
+	// A non-owner, non-holder resolve is rejected (tool error).
+	if !isToolError(callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "C", "state": "done"})) {
+		t.Fatal("non-owner non-holder resolve must be rejected")
+	}
+	// The owner label (NOT the holder A) may override-resolve.
+	r := respText(t, callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "alvin", "state": "done"}))
+	if !strings.Contains(r, "resolved") {
+		t.Fatalf("owner override resolve should succeed: %s", r)
+	}
+	// Resolved → terminal: any further claim is DENIED.
+	b := respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "B"}))
+	if !strings.Contains(b, "DENIED") {
+		t.Fatalf("resolved task must be terminal (claim DENIED): %s", b)
+	}
+}
+
+// TestHeartbeatRendersOneLine asserts presence is last-wins per agent: N
+// heartbeats from ONE agent collapse to exactly ONE "~ <agent>" render line in
+// both read and inbox, showing the newest status.
+func TestHeartbeatRendersOneLine(t *testing.T) {
+	s := newMemServer(t)
+	for _, st := range []string{"starting", "building", "testing"} {
+		respText(t, callNamed(s, "heartbeat", map[string]any{"from": "worker-1", "status": st, "area": "proj/x"}))
+	}
+
+	rd := respText(t, callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0}))
+	if got := strings.Count(rd, "~ worker-1"); got != 1 {
+		t.Fatalf("read presence lines for worker-1 = %d, want exactly 1:\n%s", got, rd)
+	}
+	if got := strings.Count(rd, "~ "); got != 1 {
+		t.Fatalf("read total presence lines = %d, want exactly 1:\n%s", got, rd)
+	}
+	if !strings.Contains(rd, "testing") {
+		t.Fatalf("read presence should show the newest status 'testing' (last-wins):\n%s", rd)
+	}
+
+	ib := respText(t, callNamed(s, "inbox", map[string]any{"target": "worker-1"}))
+	if got := strings.Count(ib, "~ worker-1"); got != 1 {
+		t.Fatalf("inbox presence lines for worker-1 = %d, want exactly 1:\n%s", got, ib)
+	}
+}

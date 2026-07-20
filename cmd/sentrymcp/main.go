@@ -1096,8 +1096,16 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		if dlErr != nil {
 			return s.toolErr(req.ID, "invalid deadline: "+dlErr.Error())
 		}
+		// Spec: a deadline is only recorded for kind=task. The deadline arg is still
+		// validated above for any kind (invalid → tool error, never a silent drop),
+		// but its value is applied only to tasks — a note/question/etc. records
+		// Deadline==0 regardless of what was passed. (ttl is unaffected: any kind.)
+		deadline := int64(0)
+		if kind == "task" {
+			deadline = dl
+		}
 		s.mu.Lock()
-		seq, err := s.chat.Post(tenant, comms.MessagePayload{Area: area, From: from, Kind: kind, Text: text, Target: target, Ref: ref, ExpiresAt: exp, Deadline: dl})
+		seq, err := s.chat.Post(tenant, comms.MessagePayload{Area: area, From: from, Kind: kind, Text: text, Target: target, Ref: ref, ExpiresAt: exp, Deadline: deadline})
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "post failed: "+err.Error())
