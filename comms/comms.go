@@ -105,6 +105,7 @@ type Store struct {
 	presence      map[sentry.TenantID]map[string]Presence   // ephemeral heartbeat slots, keyed by agent label (never journaled)
 	leaseTTL      time.Duration                             // task-claim lease length
 	presenceStale time.Duration                             // presence slot expiry after last update
+	ownerLabel    string                                    // agent label allowed to override Resolve ("" = holder only)
 }
 
 func message(seq uint64, tenant sentry.TenantID, ts int64, p MessagePayload) Message {
@@ -249,6 +250,21 @@ func New(journal *sentry.Store) (*Store, error) {
 
 	s.tasks = map[sentry.TenantID]map[uint64]*TaskState{}
 	s.presence = map[sentry.TenantID]map[string]Presence{}
+
+	// Pass 4: task state. Seed pending for EVERY kind=task message BEFORE replaying
+	// state events, so a never-claimed task (which emits no EventMessageState) stays
+	// claimable across restart (absence == pending) and its Deadline is known before
+	// replay applies EventMessageState last-wins on top. New runs single-threaded
+	// (Store not yet shared), so the *Locked helpers are safe without s.mu here.
+	for _, m := range s.entries {
+		if m.Kind == "task" {
+			s.seedTaskLocked(m.Tenant, m.Seq, m.Deadline)
+		}
+	}
+	if err := s.replayStateLocked(); err != nil {
+		return nil, err
+	}
+
 	s.hub = newHub()
 	return s, nil
 }
@@ -276,6 +292,11 @@ func (s *Store) Post(tenant sentry.TenantID, p MessagePayload) (uint64, error) {
 	}
 	msg := message(uint64(seq), tenant, time.Now().UnixNano(), p)
 	s.entries = append(s.entries, msg)
+	// A kind=task post seeds pending state (no state event needed for the initial
+	// pending; absence of a task-state entry for a kind=task seq == pending).
+	if p.Kind == "task" {
+		s.seedTaskLocked(tenant, uint64(seq), p.Deadline)
+	}
 	s.pruneAt(msg.TS)
 	s.mu.Unlock()
 	s.hub.publish(msg)
