@@ -666,6 +666,21 @@ func (s *server) dispatch(line []byte, tenant sentry.TenantID) (rpcResp, bool) {
 	}
 }
 
+// taskFieldSchema is the outputSchema fragment for a message's task sub-object,
+// shared by read and inbox (state required; holder/leaseUntil/deadline optional).
+func taskFieldSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"state":      map[string]any{"type": "string", "description": "pending|claimed|done|cancel|overdue"},
+			"holder":     map[string]any{"type": "string"},
+			"leaseUntil": map[string]any{"type": "integer", "description": "unix nanos"},
+			"deadline":   map[string]any{"type": "integer", "description": "unix nanos; 0=none"},
+		},
+		"required": []any{"state"},
+	}
+}
+
 func toolList() []map[string]any {
 	return []map[string]any{
 		{
@@ -717,6 +732,27 @@ func toolList() []map[string]any {
 				},
 				"required": []any{"query"},
 			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string"},
+					"count": map[string]any{"type": "integer", "description": "number of memories returned"},
+					"memories": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"id":       map[string]any{"type": "integer"},
+								"distance": map[string]any{"type": "number", "description": "squared-L2 distance, smaller=closer"},
+								"text":     map[string]any{"type": "string"},
+								"tags":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+							},
+							"required": []any{"id", "distance", "text"},
+						},
+					},
+				},
+				"required": []any{"query", "count", "memories"},
+			},
 		},
 		{
 			"name":        "forget",
@@ -759,6 +795,53 @@ func toolList() []map[string]any {
 				},
 				"required": []any{"area"},
 			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"area":   map[string]any{"type": "string"},
+					"target": map[string]any{"type": "string"},
+					"cursor": map[string]any{"type": "integer", "description": "highest # shown; use as the next since"},
+					"presence": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"agent":  map[string]any{"type": "string"},
+								"area":   map[string]any{"type": "string"},
+								"status": map[string]any{"type": "string"},
+								"ageSec": map[string]any{"type": "integer", "description": "seconds since the last heartbeat"},
+							},
+							"required": []any{"agent", "status", "ageSec"},
+						},
+					},
+					"messages": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"seq":    map[string]any{"type": "integer"},
+								"from":   map[string]any{"type": "string"},
+								"target": map[string]any{"type": "string", "description": "directed agent label; empty = broadcast"},
+								"kind":   map[string]any{"type": "string"},
+								"text":   map[string]any{"type": "string"},
+								"image": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"blob": map[string]any{"type": "string"},
+										"mime": map[string]any{"type": "string"},
+										"w":    map[string]any{"type": "integer"},
+										"h":    map[string]any{"type": "integer"},
+										"size": map[string]any{"type": "integer"},
+									},
+								},
+								"task": taskFieldSchema(),
+							},
+							"required": []any{"seq", "from", "kind", "text"},
+						},
+					},
+				},
+				"required": []any{"area", "cursor", "messages"},
+			},
 		},
 		{
 			"name":        "comms_clear",
@@ -779,6 +862,40 @@ func toolList() []map[string]any {
 					"since":  map[string]any{"type": "integer", "description": "return only messages with # greater than this (default 0 = all)"},
 				},
 				"required": []any{"target"},
+			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target": map[string]any{"type": "string"},
+					"count":  map[string]any{"type": "integer", "description": "number of messages returned"},
+					"cursor": map[string]any{"type": "integer", "description": "highest # shown; use as the next since"},
+					"messages": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"seq":    map[string]any{"type": "integer"},
+								"area":   map[string]any{"type": "string"},
+								"from":   map[string]any{"type": "string"},
+								"target": map[string]any{"type": "string", "description": "directed agent label; empty = broadcast"},
+								"kind":   map[string]any{"type": "string"},
+								"text":   map[string]any{"type": "string"},
+								"image": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"blob": map[string]any{"type": "string"},
+										"mime": map[string]any{"type": "string"},
+										"w":    map[string]any{"type": "integer"},
+										"h":    map[string]any{"type": "integer"},
+									},
+								},
+								"task": taskFieldSchema(),
+							},
+							"required": []any{"seq", "area", "from", "kind", "text"},
+						},
+					},
+				},
+				"required": []any{"target", "count", "cursor", "messages"},
 			},
 		},
 		{
@@ -1085,7 +1202,7 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			s.recallMu.Unlock()
 		}
 		s.moko.Info("recall", map[string]string{"tenant": fmt.Sprint(tenant), "k": fmt.Sprint(k), "hits": fmt.Sprint(len(hits))})
-		return s.toolText(req.ID, formatRecall(query, hits))
+		return s.toolStruct(req.ID, formatRecall(query, hits), recallStruct(query, hits))
 	case "forget":
 		if s.mem == nil {
 			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
@@ -1159,9 +1276,15 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		var b strings.Builder
 		// Lifecycle-v2: prepend a compact presence section (nothing when no live
 		// agents → byte-identical to v1) before the message lines.
-		writePresence(&b, s.chat.PresenceList(tenant), now)
+		slots := s.chat.PresenceList(tenant)
+		writePresence(&b, slots, now)
 		var last uint64 = since
 		n := 0
+		// structuredContent (MCP 2025-06-18): mirror EXACTLY the data the text lines
+		// show — one entry per displayed message, with image/task sub-objects where
+		// the text carries an image line or a ⟨task⟩ suffix. Never nil so it marshals
+		// to a JSON array.
+		outMsgs := []map[string]any{}
 		for _, m := range msgs {
 			if target != "" && m.Target != "" && m.Target != target {
 				continue // filter: keep broadcasts + those addressed to target
@@ -1170,29 +1293,44 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			if to == "" {
 				to = "all"
 			}
+			sm := map[string]any{"seq": m.Seq, "from": m.From, "target": m.Target, "text": m.Text}
 			if m.BlobID != "" {
 				fmt.Fprintf(&b, "#%d [image] %s→%s: %s [%s %dx%d %dB · get_image(%d)]\n", m.Seq, m.From, to, m.Text, m.Mime, m.W, m.H, m.Size, m.Seq)
+				sm["kind"] = "image"
+				sm["image"] = map[string]any{"blob": m.BlobID, "mime": m.Mime, "w": m.W, "h": m.H, "size": m.Size}
 			} else {
 				// Task messages gain a live-state suffix; non-tasks (TaskOf ok=false)
 				// render byte-identical to v1.
 				fmt.Fprintf(&b, "#%d [%s] %s→%s: %s", m.Seq, m.Kind, m.From, to, m.Text)
+				sm["kind"] = m.Kind
 				if ts, ok := s.chat.TaskOf(tenant, m.Seq); ok {
 					b.WriteString(taskSuffix(ts))
+					sm["task"] = taskStruct(ts)
 				}
 				b.WriteByte('\n')
 			}
+			outMsgs = append(outMsgs, sm)
 			if m.Seq > last {
 				last = m.Seq
 			}
 			n++
 		}
+		structured := map[string]any{
+			"area":     area,
+			"cursor":   last,
+			"presence": presenceStruct(slots, now),
+			"messages": outMsgs,
+		}
+		if target != "" {
+			structured["target"] = target
+		}
 		if n == 0 {
 			// No new messages: keep v1's exact text, only prefixed by presence (if any).
 			fmt.Fprintf(&b, "no new messages in %s since #%d", area, since)
-			return s.toolText(req.ID, b.String())
+			return s.toolStruct(req.ID, b.String(), structured)
 		}
 		fmt.Fprintf(&b, "(cursor: #%d)", last)
-		return s.toolText(req.ID, b.String())
+		return s.toolStruct(req.ID, b.String(), structured)
 	case "comms_clear":
 		area, _ := strArg(p.Args, "area")
 		if area == "" {
@@ -1217,32 +1355,47 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		var b strings.Builder
 		// Lifecycle-v2: prepend the presence section (empty → byte-identical to v1).
 		writePresence(&b, s.chat.PresenceList(tenant), now)
+		// structuredContent (MCP 2025-06-18): one entry per message (across areas),
+		// mirroring the text — image/task sub-objects where the text shows them. The
+		// inbox image line omits the byte size, so the image object does too.
+		cursor := inboxSince
+		outMsgs := []map[string]any{}
 		if len(msgs) == 0 {
 			fmt.Fprintf(&b, "inbox empty for %q (since #%d)", target, inboxSince)
 		} else {
 			fmt.Fprintf(&b, "%d message(s) for %q:\n", len(msgs), target)
-			cursor := inboxSince
 			for _, m := range msgs {
 				tgt := m.Target
 				if tgt == "" {
 					tgt = "all"
 				}
+				sm := map[string]any{"seq": m.Seq, "area": m.Area, "from": m.From, "target": m.Target, "text": m.Text}
 				if m.BlobID != "" {
 					fmt.Fprintf(&b, "#%d [image] %s→%s @%s: %s [%s %dx%d · get_image(%d)]\n", m.Seq, m.From, tgt, m.Area, m.Text, m.Mime, m.W, m.H, m.Seq)
+					sm["kind"] = "image"
+					sm["image"] = map[string]any{"blob": m.BlobID, "mime": m.Mime, "w": m.W, "h": m.H}
 				} else {
 					fmt.Fprintf(&b, "#%d [%s] %s→%s @%s: %s", m.Seq, m.Kind, m.From, tgt, m.Area, m.Text)
+					sm["kind"] = m.Kind
 					if ts, ok := s.chat.TaskOf(tenant, m.Seq); ok {
 						b.WriteString(taskSuffix(ts))
+						sm["task"] = taskStruct(ts)
 					}
 					b.WriteByte('\n')
 				}
+				outMsgs = append(outMsgs, sm)
 				if m.Seq > cursor {
 					cursor = m.Seq
 				}
 			}
 			fmt.Fprintf(&b, "(cursor: #%d)", cursor)
 		}
-		return s.toolText(req.ID, b.String())
+		return s.toolStruct(req.ID, b.String(), map[string]any{
+			"target":   target,
+			"cursor":   cursor,
+			"count":    len(msgs),
+			"messages": outMsgs,
+		})
 	case "claim":
 		seq := uintArg(p.Args, "seq")
 		by, _ := strArg(p.Args, "by")
@@ -1476,6 +1629,58 @@ func taskSuffix(ts comms.TaskState) string {
 		parts = append(parts, "due "+time.Unix(0, ts.Deadline).Format("15:04"))
 	}
 	return "  ⟨" + strings.Join(parts, " · ") + "⟩"
+}
+
+// presenceStruct builds the structuredContent presence array from the same live
+// slots writePresence renders — {agent, status, ageSec} plus area when set. ageSec
+// is the whole-seconds age (clamped at 0 for clock skew) of compactAge's input, so
+// the structured value tracks the human "(<age>)" the text shows. Never nil.
+func presenceStruct(slots []comms.Presence, now time.Time) []map[string]any {
+	out := []map[string]any{}
+	for _, p := range slots {
+		age := (now.UnixNano() - p.TS) / int64(time.Second)
+		if age < 0 {
+			age = 0
+		}
+		e := map[string]any{"agent": p.Agent, "status": p.Status, "ageSec": age}
+		if p.Area != "" {
+			e["area"] = p.Area
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// taskStruct builds the structuredContent task object for a message whose text
+// carries a ⟨task⟩ suffix (TaskOf ok). It mirrors taskSuffix's data: state always;
+// holder/leaseUntil/deadline only when present (holder set, lease/deadline > 0).
+func taskStruct(ts comms.TaskState) map[string]any {
+	m := map[string]any{"state": ts.State}
+	if ts.Holder != "" {
+		m["holder"] = ts.Holder
+	}
+	if ts.LeaseUntil > 0 {
+		m["leaseUntil"] = ts.LeaseUntil
+	}
+	if ts.Deadline > 0 {
+		m["deadline"] = ts.Deadline
+	}
+	return m
+}
+
+// recallStruct builds the structuredContent for recall — {query, count, memories}
+// — mirroring formatRecall: each memory carries id/distance/text, and tags only
+// when non-empty (the text shows tags only then). distance is the squared-L2 score.
+func recallStruct(query string, hits []memory.Memory) map[string]any {
+	mems := []map[string]any{}
+	for _, h := range hits {
+		m := map[string]any{"id": h.ID, "distance": float64(h.Score), "text": h.Text}
+		if len(h.Tags) > 0 {
+			m["tags"] = h.Tags
+		}
+		mems = append(mems, m)
+	}
+	return map[string]any{"query": query, "count": len(hits), "memories": mems}
 }
 
 // compactAge renders a nanosecond age as a short human string (0s, 45s, 12m, 3h).

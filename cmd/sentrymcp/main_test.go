@@ -1370,3 +1370,179 @@ func TestResolveStructuredContent(t *testing.T) {
 		t.Fatal("resolve tool must advertise an outputSchema")
 	}
 }
+
+func TestRecallStructuredContent(t *testing.T) {
+	s := newMemServer(t)
+	respText(t, callNamed(s, "remember", map[string]any{"text": "prefer tabs over spaces", "tags": []any{"style", "fmt"}}))
+	respText(t, callNamed(s, "remember", map[string]any{"text": "deploy on fridays"}))
+
+	r := callNamed(s, "recall", map[string]any{"query": "indentation style", "k": float64(2)})
+
+	// text MUST stay byte-identical to v1 (formatRecall of the same hits).
+	hits, err := s.mem.Recall(s.tenant, "indentation style", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantText := formatRecall("indentation style", hits)
+	if got := respText(t, r); got != wantText {
+		t.Fatalf("recall text changed:\n got: %q\nwant: %q", got, wantText)
+	}
+
+	sc := respStruct(t, r)
+	if sc["query"] != "indentation style" {
+		t.Fatalf("recall structured query = %v, want %q", sc["query"], "indentation style")
+	}
+	if sc["count"].(int) != len(hits) {
+		t.Fatalf("recall structured count = %v, want %d", sc["count"], len(hits))
+	}
+	mems, ok := sc["memories"].([]map[string]any)
+	if !ok || len(mems) != len(hits) {
+		t.Fatalf("recall structured memories bad: %#v", sc["memories"])
+	}
+	// The nearest hit ("prefer tabs over spaces") comes first and carries its tags,
+	// id, distance and text — the same data the text lines show.
+	first := mems[0]
+	if first["text"] != "prefer tabs over spaces" {
+		t.Fatalf("recall memories[0].text = %v, want the nearest memory", first["text"])
+	}
+	if _, ok := first["id"].(uint64); !ok {
+		t.Fatalf("recall memories[0].id not uint64: %#v", first["id"])
+	}
+	if _, ok := first["distance"].(float64); !ok {
+		t.Fatalf("recall memories[0].distance not float64: %#v", first["distance"])
+	}
+	tags, ok := first["tags"].([]string)
+	if !ok || len(tags) != 2 || tags[0] != "style" {
+		t.Fatalf("recall memories[0].tags = %#v, want [style fmt]", first["tags"])
+	}
+	// A tag-less memory omits the tags key entirely (mirrors the text, which shows none).
+	if _, present := mems[1]["tags"]; present {
+		t.Fatalf("tag-less memory should omit tags key, got %#v", mems[1])
+	}
+	if outputSchemaOf(t, "recall") == nil {
+		t.Fatal("recall tool must advertise an outputSchema")
+	}
+}
+
+func TestReadStructuredContentWithPresenceAndTask(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	// A heartbeat populates a presence slot (no channel message).
+	respText(t, callNamed(s, "heartbeat", map[string]any{"from": "worker-2", "status": "building", "area": "proj/x"}))
+	// A claimed task should surface its live state in the structured message.
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task"})
+	seq := extractSeq(t, post)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "worker-2"}))
+
+	r := callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0})
+
+	// text still renders presence + the ⟨claimed by …⟩ suffix (behavior unchanged).
+	txt := respText(t, r)
+	if !strings.Contains(txt, "~ worker-2") || !strings.Contains(txt, "⟨claimed by worker-2") {
+		t.Fatalf("read text lost presence/task rendering:\n%s", txt)
+	}
+
+	sc := respStruct(t, r)
+	if sc["area"] != "proj/x" {
+		t.Fatalf("read structured area = %v, want proj/x", sc["area"])
+	}
+	if sc["cursor"].(uint64) != seq {
+		t.Fatalf("read structured cursor = %v, want %d", sc["cursor"], seq)
+	}
+
+	// presence[] carries the heartbeat slot.
+	pres, ok := sc["presence"].([]map[string]any)
+	if !ok || len(pres) != 1 {
+		t.Fatalf("read structured presence bad: %#v", sc["presence"])
+	}
+	if pres[0]["agent"] != "worker-2" || pres[0]["status"] != "building" || pres[0]["area"] != "proj/x" {
+		t.Fatalf("presence slot wrong: %#v", pres[0])
+	}
+	if _, ok := pres[0]["ageSec"].(int64); !ok {
+		t.Fatalf("presence ageSec not int64: %#v", pres[0]["ageSec"])
+	}
+
+	// messages[] carries seq/from/kind/text and the claimed task state.
+	msgs, ok := sc["messages"].([]map[string]any)
+	if !ok || len(msgs) != 1 {
+		t.Fatalf("read structured messages bad: %#v", sc["messages"])
+	}
+	m0 := msgs[0]
+	if m0["seq"].(uint64) != seq {
+		t.Fatalf("message seq = %v, want %d", m0["seq"], seq)
+	}
+	if m0["from"] != "lead" || m0["kind"] != "task" || m0["text"] != "migrate schema" {
+		t.Fatalf("message core fields wrong: %#v", m0)
+	}
+	task, ok := m0["task"].(map[string]any)
+	if !ok {
+		t.Fatalf("claimed message missing task state: %#v", m0)
+	}
+	if task["state"] != "claimed" {
+		t.Fatalf("task state = %v, want claimed", task["state"])
+	}
+	if task["holder"] != "worker-2" {
+		t.Fatalf("task holder = %v, want worker-2", task["holder"])
+	}
+	if lu, ok := task["leaseUntil"].(int64); !ok || lu <= 0 {
+		t.Fatalf("task leaseUntil should be a positive int64, got %#v", task["leaseUntil"])
+	}
+	if outputSchemaOf(t, "read") == nil {
+		t.Fatal("read tool must advertise an outputSchema")
+	}
+}
+
+func TestInboxStructuredContent(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch1", From: "alice", Text: "ping", Target: "08", Kind: "question"})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch2", From: "bob", Text: "fyi", Target: "08", Kind: "info"})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch1", From: "alice", Text: "not for 08", Target: "09"})
+
+	r := callNamed(s, "inbox", map[string]any{"target": "08"})
+
+	// text unchanged: both directed messages present, the 09-directed one absent.
+	txt := respText(t, r)
+	if !strings.Contains(txt, "ping") || !strings.Contains(txt, "fyi") || strings.Contains(txt, "not for 08") {
+		t.Fatalf("inbox text wrong:\n%s", txt)
+	}
+
+	sc := respStruct(t, r)
+	if sc["target"] != "08" {
+		t.Fatalf("inbox structured target = %v, want 08", sc["target"])
+	}
+	if sc["count"].(int) != 2 {
+		t.Fatalf("inbox structured count = %v, want 2", sc["count"])
+	}
+	if _, ok := sc["cursor"].(uint64); !ok {
+		t.Fatalf("inbox structured cursor not uint64: %#v", sc["cursor"])
+	}
+	msgs, ok := sc["messages"].([]map[string]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("inbox structured messages bad: %#v", sc["messages"])
+	}
+	// The cross-area message from ch2 carries seq/area/from/target/kind/text.
+	var found bool
+	for _, m := range msgs {
+		if m["text"] == "fyi" {
+			found = true
+			if m["area"] != "ch2" {
+				t.Fatalf("fyi message area = %v, want ch2", m["area"])
+			}
+			if m["from"] != "bob" || m["target"] != "08" || m["kind"] != "info" {
+				t.Fatalf("fyi message fields wrong: %#v", m)
+			}
+			if _, ok := m["seq"].(uint64); !ok {
+				t.Fatalf("fyi message seq not uint64: %#v", m["seq"])
+			}
+		}
+		if m["text"] == "not for 08" {
+			t.Fatalf("inbox structured leaked a message directed at 09: %#v", m)
+		}
+	}
+	if !found {
+		t.Fatalf("inbox structured missing the fyi message: %#v", msgs)
+	}
+	if outputSchemaOf(t, "inbox") == nil {
+		t.Fatal("inbox tool must advertise an outputSchema")
+	}
+}
