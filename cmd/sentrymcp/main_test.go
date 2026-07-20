@@ -1184,3 +1184,189 @@ func TestHeartbeatRendersOneLine(t *testing.T) {
 		t.Fatalf("inbox presence lines for worker-1 = %d, want exactly 1:\n%s", got, ib)
 	}
 }
+
+// --- outputSchema + structuredContent (MCP 2025-06-18) + protocol negotiation ---
+
+// respStruct extracts the structuredContent map from a tool result, failing if
+// it is absent. It does NOT require isError to be unset (DENIED claim carries
+// structuredContent with claimed:false and isError=false).
+func respStruct(t *testing.T, r rpcResp) map[string]any {
+	t.Helper()
+	m, ok := r.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("respStruct: result not a map: %#v", r.Result)
+	}
+	sc, ok := m["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("respStruct: no structuredContent map in result: %#v", m)
+	}
+	return sc
+}
+
+// outputSchemaOf returns the outputSchema advertised for a tool, or nil.
+func outputSchemaOf(t *testing.T, name string) map[string]any {
+	t.Helper()
+	for _, tl := range toolList() {
+		if tl["name"] == name {
+			os, _ := tl["outputSchema"].(map[string]any)
+			return os
+		}
+	}
+	t.Fatalf("outputSchemaOf: tool %q not found", name)
+	return nil
+}
+
+func TestNegotiateVersion(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"2024-11-05", "2024-11-05"}, // old client keeps its version
+		{"2025-06-18", "2025-06-18"}, // new client gets the new version
+		{"", "2025-06-18"},           // unspecified → newest supported
+		{"garbage", "2025-06-18"},    // unsupported → newest supported
+		{"2099-01-01", "2025-06-18"}, // future/unknown → newest supported
+	} {
+		if got := negotiateVersion(c.in); got != c.want {
+			t.Errorf("negotiateVersion(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestInitializeNegotiatesProtocolVersion(t *testing.T) {
+	s := newMemServer(t)
+	check := func(line, want string) {
+		t.Helper()
+		resp, ok := s.dispatch([]byte(line), s.tenant)
+		if !ok {
+			t.Fatalf("dispatch returned no response for %s", line)
+		}
+		m, ok := resp.Result.(map[string]any)
+		if !ok {
+			t.Fatalf("initialize result not a map: %#v", resp.Result)
+		}
+		if got := m["protocolVersion"]; got != want {
+			t.Fatalf("initialize echoed protocolVersion=%v, want %q (req=%s)", got, want, line)
+		}
+	}
+	check(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`, "2024-11-05")
+	check(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`, "2025-06-18")
+	check(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"garbage"}}`, "2025-06-18")
+	check(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, "2025-06-18")
+}
+
+func TestStatsStructuredContent(t *testing.T) {
+	s := newMemServer(t)
+	respText(t, callNamed(s, "remember", map[string]any{"text": "a durable fact"}))
+	wantEvents := uint64(s.store.ReadNextSeq() - 1)
+
+	r := callNamed(s, "stats", map[string]any{})
+	// text MUST stay byte-identical to v1.
+	txt := respText(t, r)
+	wantText := fmt.Sprintf("journal holds %d events", wantEvents)
+	if txt != wantText {
+		t.Fatalf("stats text changed: got %q want %q", txt, wantText)
+	}
+	sc := respStruct(t, r)
+	got, ok := sc["events"].(uint64)
+	if !ok {
+		t.Fatalf("stats structuredContent.events not uint64: %#v", sc["events"])
+	}
+	if got != wantEvents {
+		t.Fatalf("stats structuredContent.events = %d, want %d", got, wantEvents)
+	}
+	if outputSchemaOf(t, "stats") == nil {
+		t.Fatal("stats tool must advertise an outputSchema")
+	}
+}
+
+func TestClaimStructuredContentOKAndDenied(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task"})
+	seq := extractSeq(t, post)
+
+	// OK claim: text byte-identical shape + structuredContent.
+	okResp := callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"})
+	okText := respText(t, okResp)
+	if !strings.Contains(okText, "claimed") || strings.Contains(okText, "DENIED") {
+		t.Fatalf("claim OK text unexpected: %q", okText)
+	}
+	sc := respStruct(t, okResp)
+	if sc["seq"].(uint64) != seq {
+		t.Fatalf("claim seq = %v, want %d", sc["seq"], seq)
+	}
+	if sc["claimed"] != true {
+		t.Fatalf("claim claimed = %v, want true", sc["claimed"])
+	}
+	if sc["holder"] != "A" {
+		t.Fatalf("claim holder = %v, want A", sc["holder"])
+	}
+	if sc["state"] != "claimed" {
+		t.Fatalf("claim state = %v, want claimed", sc["state"])
+	}
+	lu, ok := sc["leaseUntil"].(int64)
+	if !ok || lu <= 0 {
+		t.Fatalf("claim leaseUntil should be a positive int64 lease ts, got %#v", sc["leaseUntil"])
+	}
+
+	// DENIED claim: NOT a tool error, claimed:false, holder is the live winner.
+	denResp := callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "B"})
+	if isToolError(denResp) {
+		t.Fatal("DENIED claim must NOT be a tool error (isError must be unset)")
+	}
+	denText := respText(t, denResp)
+	if !strings.Contains(denText, "DENIED") {
+		t.Fatalf("claim DENIED text unexpected: %q", denText)
+	}
+	dsc := respStruct(t, denResp)
+	if dsc["claimed"] != false {
+		t.Fatalf("denied claimed = %v, want false", dsc["claimed"])
+	}
+	if dsc["holder"] != "A" {
+		t.Fatalf("denied holder = %v, want A (the live holder)", dsc["holder"])
+	}
+	if dsc["seq"].(uint64) != seq {
+		t.Fatalf("denied seq = %v, want %d", dsc["seq"], seq)
+	}
+	if outputSchemaOf(t, "claim") == nil {
+		t.Fatal("claim tool must advertise an outputSchema")
+	}
+}
+
+func TestResolveStructuredContent(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "do it", "kind": "task"})
+	seq := extractSeq(t, post)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"}))
+
+	r := callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "A", "state": "done"})
+	txt := respText(t, r)
+	want := fmt.Sprintf("resolved #%d as done", seq)
+	if txt != want {
+		t.Fatalf("resolve text changed: got %q want %q", txt, want)
+	}
+	sc := respStruct(t, r)
+	if sc["seq"].(uint64) != seq {
+		t.Fatalf("resolve seq = %v, want %d", sc["seq"], seq)
+	}
+	if sc["resolved"] != true {
+		t.Fatalf("resolve resolved = %v, want true", sc["resolved"])
+	}
+	if sc["state"] != "done" {
+		t.Fatalf("resolve state = %v, want done", sc["state"])
+	}
+	if sc["by"] != "A" {
+		t.Fatalf("resolve by = %v, want A", sc["by"])
+	}
+
+	// default state ("" → done) also reflected in structuredContent.
+	post2 := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "do it 2", "kind": "task"})
+	seq2 := extractSeq(t, post2)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq2), "by": "A"}))
+	r2 := callNamed(s, "resolve", map[string]any{"seq": float64(seq2), "by": "A"})
+	if respStruct(t, r2)["state"] != "done" {
+		t.Fatal("resolve default state should be 'done' in structuredContent")
+	}
+	if outputSchemaOf(t, "resolve") == nil {
+		t.Fatal("resolve tool must advertise an outputSchema")
+	}
+}

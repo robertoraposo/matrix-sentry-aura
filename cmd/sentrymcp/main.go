@@ -641,8 +641,12 @@ func (s *server) dispatch(line []byte, tenant sentry.TenantID) (rpcResp, bool) {
 
 	switch req.Method {
 	case "initialize":
+		var ip struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		_ = json.Unmarshal(req.Params, &ip)
 		return s.ok(req.ID, map[string]any{
-			"protocolVersion": protocolVersion,
+			"protocolVersion": negotiateVersion(ip.ProtocolVersion),
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "matrix-sentry", "version": "0.1.0"},
 		}), true
@@ -851,6 +855,18 @@ func toolList() []map[string]any {
 				},
 				"required": []any{"seq", "by"},
 			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"seq":        map[string]any{"type": "integer"},
+					"claimed":    map[string]any{"type": "boolean", "description": "true if you now hold it; false = DENIED (someone else holds a live lease)"},
+					"holder":     map[string]any{"type": "string", "description": "the live holder (you on success, the winner on DENIED)"},
+					"leaseUntil": map[string]any{"type": "integer", "description": "unix nanos the lease is held until"},
+					"state":      map[string]any{"type": "string", "description": "pending|claimed|done|cancel|overdue"},
+					"deadline":   map[string]any{"type": "integer", "description": "unix nanos; 0=none"},
+				},
+				"required": []any{"seq", "claimed", "holder", "leaseUntil", "state"},
+			},
 		},
 		{
 			"name":        "resolve",
@@ -863,6 +879,16 @@ func toolList() []map[string]any {
 					"state": map[string]any{"type": "string", "description": "done | cancel (default done)"},
 				},
 				"required": []any{"seq", "by"},
+			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"seq":      map[string]any{"type": "integer"},
+					"resolved": map[string]any{"type": "boolean"},
+					"state":    map[string]any{"type": "string", "description": "done | cancel"},
+					"by":       map[string]any{"type": "string", "description": "the agent that resolved it"},
+				},
+				"required": []any{"seq", "resolved", "state", "by"},
 			},
 		},
 		{
@@ -882,6 +908,11 @@ func toolList() []map[string]any {
 			"name":        "stats",
 			"description": "Return how many events are stored in the journal.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+			"outputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"events": map[string]any{"type": "integer", "description": "count of events stored in the journal"}},
+				"required":   []any{"events"},
+			},
 		},
 	}
 }
@@ -1226,10 +1257,14 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			// DENIED is a normal outcome (someone else holds a live lease), not a
 			// tool error — report who holds it and until when.
 			s.moko.Info("claim", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "ok": "false", "holder": ts.Holder})
-			return s.toolText(req.ID, fmt.Sprintf("DENIED: #%d held by %s until %s", seq, ts.Holder, time.Unix(0, ts.LeaseUntil).Format("15:04")))
+			return s.toolStruct(req.ID,
+				fmt.Sprintf("DENIED: #%d held by %s until %s", seq, ts.Holder, time.Unix(0, ts.LeaseUntil).Format("15:04")),
+				map[string]any{"seq": seq, "claimed": false, "holder": ts.Holder, "leaseUntil": ts.LeaseUntil, "state": ts.State, "deadline": ts.Deadline})
 		}
 		s.moko.Info("claim", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "ok": "true"})
-		return s.toolText(req.ID, fmt.Sprintf("claimed #%d by %s, lease until %s", seq, by, time.Unix(0, ts.LeaseUntil).Format("15:04")))
+		return s.toolStruct(req.ID,
+			fmt.Sprintf("claimed #%d by %s, lease until %s", seq, by, time.Unix(0, ts.LeaseUntil).Format("15:04")),
+			map[string]any{"seq": seq, "claimed": true, "holder": ts.Holder, "leaseUntil": ts.LeaseUntil, "state": ts.State, "deadline": ts.Deadline})
 	case "resolve":
 		seq := uintArg(p.Args, "seq")
 		by, _ := strArg(p.Args, "by")
@@ -1244,7 +1279,9 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			return s.toolErr(req.ID, "resolve failed: "+err.Error())
 		}
 		s.moko.Info("resolve", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "state": state})
-		return s.toolText(req.ID, fmt.Sprintf("resolved #%d as %s", seq, state))
+		return s.toolStruct(req.ID,
+			fmt.Sprintf("resolved #%d as %s", seq, state),
+			map[string]any{"seq": seq, "resolved": true, "state": state, "by": by})
 	case "heartbeat":
 		from, _ := strArg(p.Args, "from")
 		status, _ := strArg(p.Args, "status")
@@ -1381,7 +1418,10 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		s.moko.Info("promote", map[string]string{"tenant": fmt.Sprint(tenant), "area": area, "seq": fmt.Sprint(seq), "memid": fmt.Sprint(id)})
 		return s.toolText(req.ID, fmt.Sprintf("promoted message #%d in %s → memory #%d", seq, area, id))
 	case "stats":
-		return s.toolText(req.ID, fmt.Sprintf("journal holds %d events", s.store.ReadNextSeq()-1))
+		events := uint64(s.store.ReadNextSeq() - 1)
+		return s.toolStruct(req.ID,
+			fmt.Sprintf("journal holds %d events", events),
+			map[string]any{"events": events})
 	default:
 		return s.toolErr(req.ID, "unknown tool: "+p.Name)
 	}
@@ -1655,6 +1695,32 @@ func (s *server) fail(id json.RawMessage, code int, msg string) rpcResp {
 }
 func (s *server) toolText(id json.RawMessage, text string) rpcResp {
 	return s.ok(id, map[string]any{"content": []map[string]any{{"type": "text", "text": text}}})
+}
+
+// toolStruct returns a tool result carrying BOTH the human-readable text content
+// block (byte-identical to what toolText would emit, so 2024-11-05 clients see
+// no change) AND a structuredContent value (MCP 2025-06-18). Ship this only for
+// tools that declare an outputSchema; structured MUST validate against it.
+func (s *server) toolStruct(id json.RawMessage, text string, structured any) rpcResp {
+	return s.ok(id, map[string]any{
+		"content":           []map[string]any{{"type": "text", "text": text}},
+		"structuredContent": structured,
+	})
+}
+
+// negotiateVersion picks the protocolVersion to echo in initialize. If the
+// client requested a version we support, echo exactly that — a 2024-11-05 client
+// MUST keep getting 2024-11-05 so nothing changes for it. Anything else
+// (unspecified, unknown, or newer than we know) negotiates down to the newest
+// version we support. protocolVersion (the const) remains the compatibility
+// floor/default the server is built around.
+func negotiateVersion(requested string) string {
+	switch requested {
+	case "2025-06-18", protocolVersion:
+		return requested
+	default:
+		return "2025-06-18"
+	}
 }
 func (s *server) toolErr(id json.RawMessage, text string) rpcResp {
 	return s.ok(id, map[string]any{"content": []map[string]any{{"type": "text", "text": text}}, "isError": true})
