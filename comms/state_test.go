@@ -250,6 +250,100 @@ func TestRebuildUnactionedTaskClaimable(t *testing.T) {
 	}
 }
 
+// TestOrphanTaskStateReconciledOnTTL: a kind=task with a TTL is dropped from the
+// index by the sweeper when it expires; its durable task state must be reconciled
+// away in the same pass (TaskOf ok=false) so s.tasks does not leak the orphan.
+func TestOrphanTaskStateReconciledOnTTL(t *testing.T) {
+	s, _ := newTestStore(t)
+	s.leaseTTL = 15 * time.Minute
+	t0 := time.Unix(1700000000, 0)
+	seq, err := s.Post(1, MessagePayload{Area: "a", From: "boss", Text: "ephemeral task", Kind: "task", ExpiresAt: t0.UnixNano()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.TaskOf(1, seq); !ok {
+		t.Fatal("task state must exist before its TTL expires")
+	}
+
+	s.sweepOnce(t0.Add(time.Nanosecond))
+
+	if ts, ok := s.TaskOf(1, seq); ok {
+		t.Fatalf("task state must be reconciled (gone) after its message TTL-drops: %+v", ts)
+	}
+	if got := s.Read(1, "a", 0); len(got) != 0 {
+		t.Fatalf("TTL-expired task message must be gone from Read: %+v", got)
+	}
+}
+
+// TestOrphanTaskStateNotResurrectedOnRebuild: a kind=task whose message is skipped
+// on reload (TTL already past) but which HAS a durable state event must NOT have a
+// bare orphan TaskState re-materialized by replay — TaskOf stays ok=false.
+func TestOrphanTaskStateNotResurrectedOnRebuild(t *testing.T) {
+	dir := t.TempDir()
+	j, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.leaseTTL = 15 * time.Minute
+	past := time.Unix(1, 0).UnixNano() // long past → skipped on reload
+	seq, err := s.Post(1, MessagePayload{Area: "a", From: "boss", Text: "task", Kind: "task", ExpiresAt: past})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Emit a durable state event so a naive rebuild would re-materialize an orphan.
+	if _, ok, _ := s.Claim(1, seq, "worker", time.Unix(2, 0)); !ok {
+		t.Fatal("claim must succeed")
+	}
+	j.Close()
+
+	j2, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := New(j2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ts, ok := s2.TaskOf(1, seq); ok {
+		t.Fatalf("orphan task state must not be re-materialized on rebuild: %+v", ts)
+	}
+	if got := s2.Read(1, "a", 0); len(got) != 0 {
+		t.Fatalf("expired task message must not reload into the index: %+v", got)
+	}
+}
+
+// TestOrphanTaskStateReconciledOnRetention: a kind=task message evicted from the
+// index by per-tenant retention must have its durable task state reconciled away
+// (TaskOf ok=false) — retention drops must not leak s.tasks entries.
+func TestOrphanTaskStateReconciledOnRetention(t *testing.T) {
+	s, _ := newTestStore(t)
+	s.leaseTTL = 15 * time.Minute
+	seq, err := s.Post(1, MessagePayload{Area: "a", From: "boss", Text: "task", Kind: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.TaskOf(1, seq); !ok {
+		t.Fatal("task state must exist right after Post")
+	}
+	s.SetRetention(2, 0) // keep only the last 2 per tenant
+	// Flood past the task so it (the oldest) ages out of the last-2 window.
+	for i := 0; i < 3; i++ {
+		if _, err := s.Post(1, MessagePayload{Area: "a", From: "x", Text: "flood"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := s.Read(1, "a", 0); len(got) != 2 {
+		t.Fatalf("retention should keep only the last 2, got %d", len(got))
+	}
+	if ts, ok := s.TaskOf(1, seq); ok {
+		t.Fatalf("task state must be reconciled (gone) once its message ages out of the index: %+v", ts)
+	}
+}
+
 // TestClaimNotATask: claiming a plain (non-task) message errors.
 func TestClaimNotATask(t *testing.T) {
 	s, _ := newTestStore(t)

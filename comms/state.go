@@ -151,6 +151,25 @@ func (s *Store) seedTaskLocked(tenant sentry.TenantID, seq uint64, deadline int6
 	s.tasks[tenant][seq] = &TaskState{State: "pending", Deadline: deadline}
 }
 
+// deleteTaskLocked drops tasks[tenant][seq] if present, and the tenant sub-map once
+// it empties. Caller holds s.mu. This reconciles durable task state with index
+// membership: a task's state is only meaningful while its kind=task message is live
+// in s.entries, so the TTL sweep and retention prune call this when they evict a
+// message to keep s.tasks from leaking orphans over uptime. Idempotent.
+func (s *Store) deleteTaskLocked(tenant sentry.TenantID, seq uint64) {
+	byseq := s.tasks[tenant]
+	if byseq == nil {
+		return
+	}
+	if _, ok := byseq[seq]; !ok {
+		return
+	}
+	delete(byseq, seq)
+	if len(byseq) == 0 {
+		delete(s.tasks, tenant)
+	}
+}
+
 // replayStateLocked rebuilds durable task state by scanning EventMessageState in
 // seq order, last-wins per (tenant, seq). Caller holds s.mu (or, as in New, runs
 // single-threaded before the Store is shared). Runs AFTER every kind=task message
@@ -165,13 +184,15 @@ func (s *Store) replayStateLocked() error {
 			scanErr = fmt.Errorf("comms: decode state seq %d: %w", r.Seq, err)
 			return false
 		}
-		if s.tasks[r.Tenant] == nil {
-			s.tasks[r.Tenant] = map[uint64]*TaskState{}
-		}
-		ts := s.tasks[r.Tenant][sp.Seq]
+		// Orphan guard: apply a state event ONLY to a task already seeded from a
+		// live kind=task message (Pass 4 in New). A state event whose task message
+		// was skipped on load (TTL-expired, retention-dropped, or cleared) has no
+		// seeded entry — creating a bare TaskState here would re-materialize the
+		// orphan we reconciled away, leaking s.tasks across every rebuild. Skip it;
+		// the journal record is retained but no live state is resurrected.
+		ts := s.tasks[r.Tenant][sp.Seq] // nil-safe on a nil inner map
 		if ts == nil {
-			ts = &TaskState{}
-			s.tasks[r.Tenant][sp.Seq] = ts
+			return true
 		}
 		ts.State, ts.Holder, ts.LeaseUntil = sp.State, sp.By, sp.LeaseUntil
 		return true

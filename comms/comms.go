@@ -455,6 +455,10 @@ func (s *Store) pruneAt(now int64) {
 	for i, m := range s.entries {
 		if keep[i] {
 			out = append(out, m)
+		} else {
+			// A dropped message forfeits its durable task state (if any): task
+			// state is only meaningful while its kind=task message is in the index.
+			s.deleteTaskLocked(m.Tenant, m.Seq)
 		}
 	}
 	s.entries = out

@@ -38,6 +38,10 @@ func (s *Store) sweepOnce(now time.Time) []Message {
 	var nudges []Message
 
 	s.mu.Lock()
+	// defer-unlock (not an explicit Unlock) so a panic in the critical section
+	// cannot leave s.mu locked forever. publish stays in the caller (Start), AFTER
+	// this returns, so the hub.publish-outside-lock invariant is preserved.
+	defer s.mu.Unlock()
 	// Snapshot (tenant,seq)→Message so a flipped task can nudge its area/target,
 	// built before the TTL drop so a task whose own message just expired still
 	// resolves for one last nudge.
@@ -82,6 +86,9 @@ func (s *Store) sweepOnce(now time.Time) []Message {
 	out := s.entries[:0]
 	for _, m := range s.entries {
 		if s.isExpired(m, nn) {
+			// TTL drop also reconciles the message's durable task state (if any):
+			// a task's state is only meaningful while its message is in the index.
+			s.deleteTaskLocked(m.Tenant, m.Seq)
 			continue
 		}
 		out = append(out, m)
@@ -91,7 +98,6 @@ func (s *Store) sweepOnce(now time.Time) []Message {
 	// Presence staleness + per-tenant retention.
 	s.pruneStalePresenceLocked(nn)
 	s.pruneAt(nn)
-	s.mu.Unlock()
 
 	return nudges
 }
