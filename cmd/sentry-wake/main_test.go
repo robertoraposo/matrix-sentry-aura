@@ -1,6 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,5 +166,230 @@ func TestStateRoundTrip(t *testing.T) {
 	// The persisted file must live under the state dir, not escape it.
 	if _, err := filepath.Rel(dir, filepath.Join(dir, safeName(sid))); err != nil {
 		t.Fatalf("state file escaped dir: %v", err)
+	}
+}
+
+// --- Task 3: I/O wiring (inbox fetch/parse, wake output, main) ---
+
+// stubTransport records how many requests reached the network and can return a
+// canned reply body or force an error, so the fetch/post paths are testable
+// without a live server. Mirrors cmd/sentry-deploy's test stub.
+type stubTransport struct {
+	calls   int
+	lastURL string
+	reply   []byte
+	err     error
+}
+
+func (s *stubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	s.calls++
+	s.lastURL = r.URL.String()
+	if s.err != nil {
+		return nil, s.err
+	}
+	body := s.reply
+	if body == nil {
+		body = []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}
+	return &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(bytes.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func stubClient(t *stubTransport) *http.Client { return &http.Client{Transport: t} }
+
+// mustReply frames text as a JSON-RPC tools/call reply, mirroring the server's
+// toolStruct output (result.content[0].text).
+func mustReply(text string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result": map[string]any{
+			"content": []map[string]any{{"type": "text", "text": text}},
+		},
+	})
+	return b
+}
+
+func mustJSON(m map[string]any) []byte {
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// captureStdout redirects os.Stdout for the duration of fn and returns what was
+// written, so the block-decision output of run() can be asserted.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	b, _ := io.ReadAll(r)
+	return string(b)
+}
+
+// TestParseInbox: a real inbox reply parses into messages + trailing cursor;
+// an "inbox empty" reply and malformed bodies yield no messages.
+func TestParseInbox(t *testing.T) {
+	text := "~ forge [antelisp]: working (2m)\n" +
+		"2 message(s) for \"backend\":\n" +
+		"#7 [task] forge→backend @antelisp: run the migration\n" +
+		"#9 [question] papa→backend @antelisp: status?\n" +
+		"(cursor: #9)"
+	msgs, cursor := parseInbox(mustReply(text))
+	if len(msgs) != 2 {
+		t.Fatalf("parsed %d messages, want 2: %+v", len(msgs), msgs)
+	}
+	if cursor != 9 {
+		t.Fatalf("cursor = %d, want 9", cursor)
+	}
+	m0 := msgs[0]
+	if m0.Seq != 7 || m0.From != "forge" || m0.Kind != "task" || m0.Target != "backend" || m0.Text != "run the migration" {
+		t.Fatalf("msg[0] = %+v", m0)
+	}
+	m1 := msgs[1]
+	if m1.Seq != 9 || m1.From != "papa" || m1.Kind != "question" || m1.Target != "backend" || m1.Text != "status?" {
+		t.Fatalf("msg[1] = %+v", m1)
+	}
+
+	// "inbox empty" -> no messages, no cursor.
+	if msgs, cursor := parseInbox(mustReply(`inbox empty for "backend" (since #0)`)); len(msgs) != 0 || cursor != 0 {
+		t.Fatalf("empty inbox -> %d msgs, cursor %d, want 0/0", len(msgs), cursor)
+	}
+
+	// Malformed bodies -> no messages, no panic.
+	if msgs, _ := parseInbox([]byte("not json at all")); len(msgs) != 0 {
+		t.Fatalf("garbage body -> %d msgs, want 0", len(msgs))
+	}
+	if msgs, _ := parseInbox(mustReply("random prose with no message lines")); len(msgs) != 0 {
+		t.Fatalf("no-# reply -> %d msgs, want 0", len(msgs))
+	}
+	if msgs, _ := parseInbox([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); len(msgs) != 0 {
+		t.Fatalf("empty content -> %d msgs, want 0", len(msgs))
+	}
+}
+
+// TestBuildInboxBody: a valid JSON-RPC tools/call for the `inbox` tool carrying
+// target + since.
+func TestBuildInboxBody(t *testing.T) {
+	body := buildInboxBody("backend", 12)
+	var msg struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      int    `json:"id"`
+		Method  string `json:"method"`
+		Params  struct {
+			Name string `json:"name"`
+			Args struct {
+				Target string `json:"target"`
+				Since  uint64 `json:"since"`
+			} `json:"arguments"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.JSONRPC != "2.0" || msg.Method != "tools/call" {
+		t.Errorf("envelope = %+v", msg)
+	}
+	if msg.Params.Name != "inbox" {
+		t.Errorf("tool name = %q, want inbox", msg.Params.Name)
+	}
+	if msg.Params.Args.Target != "backend" || msg.Params.Args.Since != 12 {
+		t.Errorf("args = %+v, want target=backend since=12", msg.Params.Args)
+	}
+}
+
+// TestWakeReasonContainsMessages: the wake reason lists the new directed
+// messages (seq + from + text) and excludes anything at/below the cursor.
+func TestWakeReasonContainsMessages(t *testing.T) {
+	msgs := []inboxMsg{
+		{Seq: 7, From: "forge", Kind: "task", Text: "run the migration", Target: "backend"},
+		{Seq: 9, From: "papa", Kind: "question", Text: "status?", Target: "backend"},
+	}
+	reason := wakeReason(msgs, 5)
+	for _, want := range []string{"#7", "#9", "forge", "papa", "run the migration", "status?"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("wakeReason missing %q in:\n%s", want, reason)
+		}
+	}
+	// A message already delivered (seq <= cursor) must be excluded.
+	if r := wakeReason([]inboxMsg{{Seq: 3, From: "old", Text: "stale msg"}}, 5); strings.Contains(r, "stale msg") {
+		t.Errorf("wakeReason should exclude seq<=cursor, got:\n%s", r)
+	}
+}
+
+// TestMainNoopWhenURLUnset: with no configured URL, run() makes no network
+// request and writes no output (exit 0, silent no-op).
+func TestMainNoopWhenURLUnset(t *testing.T) {
+	in := mustJSON(map[string]any{
+		"session_id": "s1", "transcript_path": "/nonexistent",
+		"stop_hook_active": false, "cwd": "/repo",
+	})
+	inbox, postC := &stubTransport{}, &stubTransport{}
+	out := captureStdout(t, func() {
+		run(in, config{}, stubClient(inbox), stubClient(postC)) // empty config: url == ""
+	})
+	if inbox.calls != 0 || postC.calls != 0 {
+		t.Fatalf("expected no requests when URL unset, got inbox=%d post=%d", inbox.calls, postC.calls)
+	}
+	if out != "" {
+		t.Fatalf("expected no output when URL unset, got %q", out)
+	}
+}
+
+// TestRunWakesOnNewMessage: end-to-end wiring — a fresh inbox message drives run
+// to fetch the inbox once, emit a {"decision":"block"} carrying the message, and
+// NOT post (wake, not close).
+func TestRunWakesOnNewMessage(t *testing.T) {
+	// Isolate per-session state under a temp cache dir so a prior run can't
+	// have advanced the cursor past our message.
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	t.Setenv("SENTRY_COMMS_AGENT", "backend")
+	t.Setenv("SENTRY_COMMS_AREA", "antelisp")
+
+	text := "1 message(s) for \"backend\":\n#42 [task] forge→backend @antelisp: ship it\n(cursor: #42)"
+	inbox := &stubTransport{reply: mustReply(text)}
+	postC := &stubTransport{}
+
+	tf := filepath.Join(tmp, "transcript.jsonl")
+	if err := os.WriteFile(tf, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := mustJSON(map[string]any{
+		"session_id": "wake-sess", "transcript_path": tf,
+		"stop_hook_active": false, "cwd": tmp,
+	})
+
+	out := captureStdout(t, func() {
+		run(in, config{url: "https://mcp.example/mcp", token: "tk"}, stubClient(inbox), stubClient(postC))
+	})
+
+	if inbox.calls != 1 {
+		t.Fatalf("expected 1 inbox fetch, got %d", inbox.calls)
+	}
+	if postC.calls != 0 {
+		t.Fatalf("a wake must not post, got %d post calls", postC.calls)
+	}
+	var dec struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &dec); err != nil {
+		t.Fatalf("stdout not a block-decision JSON: %q (%v)", out, err)
+	}
+	if dec.Decision != "block" {
+		t.Fatalf("decision = %q, want block", dec.Decision)
+	}
+	if !strings.Contains(dec.Reason, "ship it") || !strings.Contains(dec.Reason, "#42") {
+		t.Fatalf("wake reason missing the message: %q", dec.Reason)
 	}
 }
