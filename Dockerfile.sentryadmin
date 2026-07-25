@@ -1,0 +1,26 @@
+FROM golang:1.24-bookworm AS build
+
+WORKDIR /src
+
+COPY go.mod ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/sentryadmin \
+    ./cmd/sentryadmin
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/sentryadmin /usr/local/bin/sentryadmin
+
+USER 65532:65532
+
+EXPOSE 8810
+
+ENTRYPOINT ["/usr/local/bin/sentryadmin"]
+CMD ["-http", "0.0.0.0:8810"]
