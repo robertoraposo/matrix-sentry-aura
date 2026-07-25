@@ -341,3 +341,62 @@ func TestClearAreaTombstoneSurvivesReopen(t *testing.T) {
 		t.Fatal("Y lost on reopen")
 	}
 }
+
+// TestMessageCarriesTTLAndDeadline verifies the additive lifecycle-v2 fields
+// (ExpiresAt/Deadline) round-trip through the payload→Message projection.
+func TestMessageCarriesTTLAndDeadline(t *testing.T) {
+	m := message(1, 1, 42, MessagePayload{Area: "a", From: "f", Text: "t", ExpiresAt: 99, Deadline: 88})
+	if m.ExpiresAt != 99 || m.Deadline != 88 {
+		t.Fatalf("message() lost ttl/deadline: ExpiresAt=%d Deadline=%d", m.ExpiresAt, m.Deadline)
+	}
+}
+
+// TestPerTenantRetention verifies retention keeps the last retainN PER TENANT
+// so a noisy tenant can no longer evict a quiet tenant's live messages.
+func TestPerTenantRetention(t *testing.T) {
+	st, _ := newTestStore(t)
+	now := time.Now().UnixNano()
+	st.SetRetention(2, 0) // count only, per-tenant
+	// Tenant 2's single (lower-seq) entry precedes a 5-message tenant-1 flood.
+	st.entries = []Message{
+		{Seq: 1, Tenant: 2, TS: now - int64(time.Minute), Area: "x", Text: "tenant2-survivor"},
+		{Seq: 2, Tenant: 1, TS: now, Area: "x", Text: "t1-a"},
+		{Seq: 3, Tenant: 1, TS: now, Area: "x", Text: "t1-b"},
+		{Seq: 4, Tenant: 1, TS: now, Area: "x", Text: "t1-c"},
+		{Seq: 5, Tenant: 1, TS: now, Area: "x", Text: "t1-d"},
+		{Seq: 6, Tenant: 1, TS: now, Area: "x", Text: "t1-e"},
+	}
+	st.pruneAt(now)
+	if g := st.Recent(2, 100); len(g) != 1 || g[0].Text != "tenant2-survivor" {
+		t.Fatalf("tenant 2 evicted by tenant 1 flood: %+v", g)
+	}
+	if g := st.Recent(1, 100); len(g) != 2 || g[0].Text != "t1-d" || g[1].Text != "t1-e" {
+		t.Fatalf("tenant 1 retention: want last 2 [t1-d,t1-e], got %+v", g)
+	}
+}
+
+// TestNewSkipsExpiredEntry verifies an already-expired message is NOT loaded
+// into the index on New (deterministic from ExpiresAt), while the non-expired
+// one is; the journal record itself is retained (only the index skips it).
+func TestNewSkipsExpiredEntry(t *testing.T) {
+	dir := t.TempDir()
+	j, err := sentry.Open(dir, sentry.Options{FsyncEvery: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour).UnixNano()
+	if _, err := j.Append(1, EventMessage, MessagePayload{Area: "a", From: "x", Text: "expired", ExpiresAt: past}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.Append(1, EventMessage, MessagePayload{Area: "a", From: "x", Text: "live"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.Recent(1, 100)
+	if len(got) != 1 || got[0].Text != "live" {
+		t.Fatalf("New should skip already-expired entry, load only 'live': got %+v", got)
+	}
+}
