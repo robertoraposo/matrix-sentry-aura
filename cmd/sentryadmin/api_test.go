@@ -147,7 +147,10 @@ func TestAPIJournalUpstreamErrorIs502(t *testing.T) {
 
 func TestAPICommsGroupsByArea(t *testing.T) {
 	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/comms" { http.NotFound(w, r); return }
+		if r.URL.Path != "/admin/comms" {
+			http.NotFound(w, r)
+			return
+		}
 		w.Write([]byte(`{"messages":[
 		  {"seq":1,"ts":1,"area":"ASHLEY/COMMS/09-&gt;08","from":"09-voice","kind":"question","text":"q?","ref":0},
 		  {"seq":2,"ts":1,"area":"ASHLEY/COMMS/09-&gt;08","from":"08","kind":"answer","text":"a","ref":1},
@@ -158,31 +161,47 @@ func TestAPICommsGroupsByArea(t *testing.T) {
 	srv := &apiServer{mcpURL: mcp.URL, token: "x", client: http.DefaultClient}
 	rec := httptest.NewRecorder()
 	srv.handleComms(rec, httptest.NewRequest(http.MethodGet, "/api/comms?tenant=personal", nil))
-	if rec.Code != http.StatusOK { t.Fatalf("want 200, got %d", rec.Code) }
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
 	var d struct {
 		Columns []struct {
 			Label string `json:"label"`
 			Cards []struct {
 				Author, Type, TypeColor, Text string
-				Promotable bool `json:"promotable"`
-				Reply      bool `json:"reply"`
+				Promotable                    bool `json:"promotable"`
+				Reply                         bool `json:"reply"`
 			} `json:"cards"`
 		} `json:"columns"`
 		Agents []string `json:"agents"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil { t.Fatal(err) }
-	if len(d.Columns) != 2 { t.Fatalf("want 2 area columns, got %d", len(d.Columns)) }
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Columns) != 2 {
+		t.Fatalf("want 2 area columns, got %d", len(d.Columns))
+	}
 	foundUnescaped := false
 	for _, c := range d.Columns {
 		if c.Label == "ASHLEY/COMMS/09->08" {
 			foundUnescaped = true
-			if len(c.Cards) != 2 { t.Fatalf("that area should have 2 cards, got %d", len(c.Cards)) }
-			if c.Cards[0].Type != "pregunta" || c.Cards[0].Promotable { t.Fatalf("question card mapping wrong: %+v", c.Cards[0]) }
-			if c.Cards[1].Type != "respuesta" || !c.Cards[1].Reply { t.Fatalf("answer card mapping wrong: %+v", c.Cards[1]) }
+			if len(c.Cards) != 2 {
+				t.Fatalf("that area should have 2 cards, got %d", len(c.Cards))
+			}
+			if c.Cards[0].Type != "pregunta" || c.Cards[0].Promotable {
+				t.Fatalf("question card mapping wrong: %+v", c.Cards[0])
+			}
+			if c.Cards[1].Type != "respuesta" || !c.Cards[1].Reply {
+				t.Fatalf("answer card mapping wrong: %+v", c.Cards[1])
+			}
 		}
 	}
-	if !foundUnescaped { t.Fatal("area label was not HTML-unescaped") }
-	if len(d.Agents) != 2 { t.Fatalf("want 2 distinct agents, got %d: %v", len(d.Agents), d.Agents) }
+	if !foundUnescaped {
+		t.Fatal("area label was not HTML-unescaped")
+	}
+	if len(d.Agents) != 2 {
+		t.Fatalf("want 2 distinct agents, got %d: %v", len(d.Agents), d.Agents)
+	}
 }
 
 func TestAPICommsUpstreamErrorFallsBackEmpty(t *testing.T) {
@@ -191,6 +210,134 @@ func TestAPICommsUpstreamErrorFallsBackEmpty(t *testing.T) {
 	srv := &apiServer{mcpURL: bad.URL, token: "x", client: http.DefaultClient}
 	rec := httptest.NewRecorder()
 	srv.handleComms(rec, httptest.NewRequest(http.MethodGet, "/api/comms?tenant=personal", nil))
-	if rec.Code != http.StatusOK { t.Fatalf("UI-safe fallback should still be 200, got %d", rec.Code) }
-	if !strings.Contains(rec.Body.String(), `"columns":[]`) { t.Fatalf("expected empty fallback, got %s", rec.Body.String()) }
+	if rec.Code != http.StatusOK {
+		t.Fatalf("UI-safe fallback should still be 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"columns":[]`) {
+		t.Fatalf("expected empty fallback, got %s", rec.Body.String())
+	}
+}
+
+func TestAPIProvidersCallsMCPProviderList(t *testing.T) {
+	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-token" {
+			t.Fatalf("authorization = %q", got)
+		}
+
+		var req struct {
+			JSONRPC string `json:"jsonrpc"`
+			Method  string `json:"method"`
+			Params  struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.JSONRPC != "2.0" ||
+			req.Method != "tools/call" ||
+			req.Params.Name != "provider_list" {
+			t.Fatalf("unexpected MCP request: %+v", req)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+		  "jsonrpc":"2.0",
+		  "id":1,
+		  "result":{
+		    "content":[{"type":"text","text":"providers available: 2"}],
+		    "structuredContent":{
+		      "count":2,
+		      "providers":[
+		        {
+		          "id":"codex",
+		          "name":"Codex CLI",
+		          "auth":"cli",
+		          "capabilities":["chat","code","tools"],
+		          "state":"disconnected",
+		          "account":""
+		        },
+		        {
+		          "id":"ollama",
+		          "name":"Ollama local",
+		          "auth":"none",
+		          "capabilities":["chat","embeddings"],
+		          "state":"connected",
+		          "account":"local"
+		        }
+		      ]
+		    }
+		  }
+		}`))
+	}))
+	defer mcp.Close()
+
+	srv := &apiServer{
+		mcpURL: mcp.URL,
+		token:  "secret-token",
+		client: http.DefaultClient,
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handleProviders(
+		rec,
+		httptest.NewRequest(http.MethodGet, "/api/providers", nil),
+	)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var got struct {
+		Count     int `json:"count"`
+		Providers []struct {
+			ID      string   `json:"id"`
+			State   string   `json:"state"`
+			Account string   `json:"account"`
+			Auth    string   `json:"auth"`
+			Caps    []string `json:"capabilities"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Count != 2 || len(got.Providers) != 2 {
+		t.Fatalf("unexpected providers response: %+v", got)
+	}
+	if got.Providers[0].ID != "codex" ||
+		got.Providers[1].ID != "ollama" {
+		t.Fatalf("provider order/content wrong: %+v", got.Providers)
+	}
+}
+
+func TestAPIProvidersUpstreamErrorIs502(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+
+	srv := &apiServer{
+		mcpURL: bad.URL,
+		token:  "x",
+		client: http.DefaultClient,
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handleProviders(
+		rec,
+		httptest.NewRequest(http.MethodGet, "/api/providers", nil),
+	)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("want 502, got %d", rec.Code)
+	}
 }

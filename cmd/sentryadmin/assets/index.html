@@ -69,6 +69,7 @@
     <div style="display:flex;gap:4px;padding:4px;border-radius:12px;background:rgba(8,12,22,.5);border:1px solid rgba(120,180,255,.08)">
       <button onClick="{{ setGalaxy }}" style="{{ galaxyTabStyle }}">⬡ Vector Galaxy</button>
       <button onClick="{{ setComms }}" style="{{ commsTabStyle }}">⇄ Comms</button>
+      <button onClick="{{ setProviders }}" style="{{ providersTabStyle }}">⌁ Proveedores</button>
     </div>
 
     <div style="display:flex;align-items:center;gap:8px">
@@ -376,6 +377,69 @@
   </div>
   </sc-if>
 
+  <!-- ░░ PROVIDERS VIEW ░░ -->
+  <sc-if value="{{ isProviders }}" hint-placeholder-val="{{ false }}">
+  <div data-screen-label="Providers" style="position:absolute;z-index:8;top:72px;left:16px;right:16px;bottom:16px;display:flex;flex-direction:column;background:linear-gradient(180deg,rgba(12,17,30,.72),rgba(7,10,18,.66));-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:1px solid rgba(120,180,255,.10);border-radius:16px;box-shadow:0 18px 48px rgba(0,0,0,.5);overflow:hidden">
+
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:17px 20px;border-bottom:1px solid rgba(120,180,255,.08)">
+      <div>
+        <div style="font:700 15px 'Space Grotesk';color:#eef4fd">Provider Session Broker</div>
+        <div style="font:500 10.5px 'JetBrains Mono';color:#66728d;margin-top:5px">sesiones aisladas por tenant · las credenciales nunca se entregan a AURA</div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="font:600 10.5px 'JetBrains Mono';color:#7bf0c0">
+          {{ providerConnected }} conectados · {{ providerCount }} registrados
+        </div>
+        <button onClick="{{ refreshProviders }}" style="padding:7px 12px;border-radius:9px;border:1px solid rgba(53,230,255,.25);background:rgba(53,230,255,.08);color:#9eefff;font:600 10.5px 'Space Grotesk';cursor:pointer">
+          ↻ Actualizar
+        </button>
+      </div>
+    </div>
+
+    <div style="flex:1;overflow-y:auto;padding:20px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
+        <sc-for list="{{ providerCards }}" as="p" hint-placeholder-count="3">
+          <div style="{{ p.cardStyle }}">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+              <div>
+                <div style="font:700 14px 'Space Grotesk';color:#eaf1fb">{{ p.name }}</div>
+                <div style="font:600 9.5px 'JetBrains Mono';color:#66728d;margin-top:4px">{{ p.id }}</div>
+              </div>
+              <span style="{{ p.stateStyle }}">{{ p.stateLabel }}</span>
+            </div>
+
+            <div style="margin-top:17px;padding:11px 12px;border-radius:10px;background:rgba(5,8,16,.45);border:1px solid rgba(120,180,255,.07)">
+              <div style="display:flex;justify-content:space-between;gap:12px">
+                <span style="font:500 10px 'JetBrains Mono';color:#66728d">Autenticación</span>
+                <span style="font:600 10px 'JetBrains Mono';color:#b9c8df">{{ p.authLabel }}</span>
+              </div>
+
+              <div style="display:flex;justify-content:space-between;gap:12px;margin-top:8px">
+                <span style="font:500 10px 'JetBrains Mono';color:#66728d">Cuenta</span>
+                <span style="font:600 10px 'JetBrains Mono';color:#b9c8df">{{ p.accountLabel }}</span>
+              </div>
+            </div>
+
+            <div style="margin-top:14px">
+              <div style="font:600 9.5px 'Space Grotesk';letter-spacing:.1em;text-transform:uppercase;color:#66728d">Capacidades</div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">
+                <sc-for list="{{ p.capabilities }}" as="cap" hint-placeholder-count="3">
+                  <span style="padding:4px 8px;border-radius:7px;background:rgba(155,108,255,.1);border:1px solid rgba(155,108,255,.18);font:600 9.5px 'JetBrains Mono';color:#c5b5ff">{{ cap }}</span>
+                </sc-for>
+              </div>
+            </div>
+
+            <div style="margin-top:17px;padding-top:12px;border-top:1px solid rgba(120,180,255,.07);font:500 9.5px/1.45 'JetBrains Mono';color:#536079">
+              Conexión y desconexión estarán disponibles al incorporar sentryproviderd.
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
   <!-- hover dedup chip -->
   <div ref="{{ hoverChipRef }}" style="position:absolute;z-index:30;pointer-events:none;opacity:0;transition:opacity .15s;max-width:260px;padding:9px 12px;border-radius:11px;background:rgba(8,12,22,.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(120,180,255,.16);box-shadow:0 10px 30px rgba(0,0,0,.5)"></div>
 
@@ -407,6 +471,7 @@ class Component extends DCLogic {
       metrics: { memories: 0, clients: 0, tenants: 4, recall: 0, latency: 1.4 },
       teamsOnly: true,
       comms: null,
+      providers: { count: 0, providers: [] },
       copiedId: null,
     };
     this.canvasRef = React.createRef();
@@ -478,7 +543,11 @@ class Component extends DCLogic {
       onHover: (i) => this._onHover(i),
     });
     this.galaxy.setData(this.corpusData);
-    this.setState({ ready: true, comms: window.MatrixCorpus.comms(this.state.tenant) });
+    this.setState({
+      ready: true,
+      comms: window.MatrixCorpus.comms(this.state.tenant),
+      providers: window.MatrixLive.providers(),
+    });
     this._animateMetrics();
     this._seedJournal();
     this._tickJournal();
@@ -574,6 +643,15 @@ class Component extends DCLogic {
     this.setState({ copiedId: k.id });
     clearTimeout(this._copyT);
     this._copyT = setTimeout(() => { if (!this._dead) this.setState({ copiedId: null }); }, 1300);
+  }
+
+  refreshProviders() {
+    if (!window.MatrixLive) return;
+
+    window.MatrixLive.fetchProviders().then((providers) => {
+      if (this._dead || !providers) return;
+      this.setState({ providers });
+    });
   }
 
   // ---- journal ----
@@ -753,14 +831,66 @@ class Component extends DCLogic {
       }));
     }
 
+    const providerSource =
+      st.providers && Array.isArray(st.providers.providers)
+        ? st.providers.providers
+        : [];
+
+    const providerCards = providerSource.map((p) => {
+      const connected = p.state === "connected";
+      const connecting = p.state === "connecting";
+      const failed = p.state === "error";
+
+      let stateColor = "#7f8ca6";
+      if (connected) stateColor = "#34E5A0";
+      else if (connecting) stateColor = "#FFB23E";
+      else if (failed) stateColor = "#FF6B8B";
+
+      const labels = {
+        connected: "CONECTADO",
+        connecting: "CONECTANDO",
+        disconnected: "DESCONECTADO",
+        error: "ERROR",
+      };
+
+      const authLabels = {
+        none: "local / sin login",
+        cli: "cliente oficial",
+        oauth: "OAuth oficial",
+      };
+
+      return {
+        id: p.id,
+        name: p.name,
+        capabilities: Array.isArray(p.capabilities) ? p.capabilities : [],
+        stateLabel: labels[p.state] || String(p.state || "desconocido").toUpperCase(),
+        accountLabel: p.account || "—",
+        authLabel: authLabels[p.auth] || p.auth || "—",
+        stateStyle:
+          "padding:4px 8px;border-radius:7px;font:700 9px 'JetBrains Mono';" +
+          "letter-spacing:.05em;color:" + stateColor +
+          ";background:" + this._hexA(stateColor, 0.1) +
+          ";border:1px solid " + this._hexA(stateColor, 0.24),
+        cardStyle:
+          "padding:17px;border-radius:14px;background:rgba(10,15,27,.62);" +
+          "border:1px solid " + this._hexA(stateColor, connected ? 0.28 : 0.12) +
+          ";box-shadow:inset 0 1px 0 rgba(255,255,255,.025)",
+      };
+    });
+
     return {
       canvasRef: this.canvasRef, layerRef: this.layerRef, hoverChipRef: this.hoverChipRef,
       journalRef: this.journalRef, recallInputRef: this.recallInputRef,
       notReady: !st.ready,
-      isGalaxy: st.view === "galaxy", isComms: st.view === "comms",
+      isGalaxy: st.view === "galaxy",
+      isComms: st.view === "comms",
+      isProviders: st.view === "providers",
       setGalaxy: () => this.setState({ view: "galaxy" }),
       setComms: () => this.setState({ view: "comms" }),
-      galaxyTabStyle: tab(st.view === "galaxy"), commsTabStyle: tab(st.view === "comms"),
+      setProviders: () => this.setState({ view: "providers" }),
+      galaxyTabStyle: tab(st.view === "galaxy"),
+      commsTabStyle: tab(st.view === "comms"),
+      providersTabStyle: tab(st.view === "providers"),
       tenantList, currentTenantName: tenantName(st.tenant),
       splitB: st.splitB, splitBName: tenantName(st.splitB), splitLabel, splitBtnStyle,
       onSplitClick: () => this.onSplitClick(),
@@ -780,7 +910,12 @@ class Component extends DCLogic {
       clearSel: () => this.clearSel(),
       sel: sel || {}, selQ: selQ || {},
       journalItems,
-      commsColumns, agentCount: st.comms ? st.comms.agents.length : 0,
+      commsColumns,
+      agentCount: st.comms ? st.comms.agents.length : 0,
+      providerCards,
+      providerCount: providerCards.length,
+      providerConnected: providerSource.filter((p) => p.state === "connected").length,
+      refreshProviders: () => this.refreshProviders(),
     };
   }
 

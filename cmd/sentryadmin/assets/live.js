@@ -4,6 +4,7 @@
   const cache = {};            // tenantKey -> galaxy data
   const commsCache = {};
   const journalCache = {};
+  let providersCache = null;
   window.MatrixLive = {
     async prime(tenantKey) {
       try {
@@ -18,6 +19,10 @@
           const rj = await fetch("/api/journal?tenant=" + encodeURIComponent(tenantKey) + "&limit=60");
           if (rj.ok) journalCache[tenantKey] = (await rj.json()).events || [];
         } catch (e) { /* journal optional */ }
+        try {
+          const rp = await fetch("/api/providers");
+          if (rp.ok) providersCache = await rp.json();
+        } catch (e) { /* providers optional */ }
         if (!this._patched) this._patch();
         this._patched = true;
         console.info("[live] primed", tenantKey, "points:", (cache[tenantKey].points || []).length);
@@ -28,6 +33,19 @@
     journalEvents(tenantKey) {
       const e = journalCache[tenantKey];
       return Array.isArray(e) && e.length ? e : null;
+    },
+    providers() {
+      return providersCache || { count: 0, providers: [] };
+    },
+    async fetchProviders() {
+      try {
+        const r = await fetch("/api/providers");
+        if (!r.ok) return null;
+        providersCache = await r.json();
+        return providersCache;
+      } catch (e) {
+        return null;
+      }
     },
     async fetchJournal(tenantKey) {
       try {
