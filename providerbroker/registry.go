@@ -50,12 +50,14 @@ var (
 type Registry struct {
 	mu        sync.RWMutex
 	providers map[string]Provider
+	defaults  map[string]Status
 	statuses  map[sentry.TenantID]map[string]Status
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
 		providers: make(map[string]Provider),
+		defaults:  make(map[string]Status),
 		statuses:  make(map[sentry.TenantID]map[string]Status),
 	}
 }
@@ -98,6 +100,25 @@ func (r *Registry) List() []Provider {
 	return out
 }
 
+func (r *Registry) SetDefaultStatus(
+	providerID string,
+	status Status,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.providers[providerID]; !exists {
+		return ErrUnknownProvider
+	}
+
+	if status.State == "" {
+		status.State = StateDisconnected
+	}
+
+	r.defaults[providerID] = status
+	return nil
+}
+
 func (r *Registry) SetStatus(
 	tenant sentry.TenantID,
 	providerID string,
@@ -137,6 +158,10 @@ func (r *Registry) Status(
 		if status, exists := tenantStatuses[providerID]; exists {
 			return status, true
 		}
+	}
+
+	if status, exists := r.defaults[providerID]; exists {
+		return status, true
 	}
 
 	return Status{State: StateDisconnected}, true

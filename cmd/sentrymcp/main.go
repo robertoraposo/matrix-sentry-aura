@@ -198,6 +198,24 @@ func main() {
 		moko.Info("semantic memory enabled", map[string]string{"provider": *embedProvider, "model": model, "dim": fmt.Sprint(dim)})
 	}
 
+	providerHealthEvery := time.Duration(
+		envInt("SENTRY_PROVIDER_HEALTH_SEC", 30),
+	) * time.Second
+	if providerHealthEvery < time.Second {
+		providerHealthEvery = time.Second
+	}
+
+	providerHealthTicker := time.NewTicker(providerHealthEvery)
+	defer providerHealthTicker.Stop()
+
+	go monitorOllamaStatus(
+		sweepCtx,
+		s.providers,
+		&http.Client{Timeout: 3 * time.Second},
+		*ollamaURL,
+		providerHealthTicker.C,
+	)
+
 	// Native OAuth for claude.ai connectors: enabled when an issuer URL is set.
 	// The approval passphrase is the existing SENTRY_MCP_TOKEN, so the owner
 	// already holds it. Requires HTTP transport.
