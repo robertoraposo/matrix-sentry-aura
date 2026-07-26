@@ -41,6 +41,7 @@ import (
 	"matrixsentry/comms"
 	"matrixsentry/memory"
 	"matrixsentry/mokoblinks"
+	"matrixsentry/providerbroker"
 	"matrixsentry/sentry"
 	"matrixsentry/sentry/access"
 )
@@ -86,6 +87,7 @@ type server struct {
 	blobs     *blob.Store      // content-addressed image bytes (comms image transfer)
 	oauth     *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
 	moko      *mokoblinks.Client
+	providers *providerbroker.Registry
 	tenant    sentry.TenantID
 	token     string         // optional bearer auth for HTTP transport
 	tokens    *tokenRegistry // secret→tenant; owner built-in, teams from SENTRY_TOKENS_FILE
@@ -122,7 +124,7 @@ func main() {
 	}
 
 	moko := mokoblinks.FromEnv()
-	s := &server{store: store, reg: reg, moko: moko, tenant: sentry.TenantID(*tenant), logRecall: envBool("SENTRY_RECALL_LOG", true)}
+	s := &server{store: store, reg: reg, moko: moko, providers: defaultProviderRegistry(), tenant: sentry.TenantID(*tenant), logRecall: envBool("SENTRY_RECALL_LOG", true)}
 
 	s.chat, err = comms.New(store)
 	if err != nil {
@@ -682,7 +684,7 @@ func taskFieldSchema() map[string]any {
 }
 
 func toolList() []map[string]any {
-	return []map[string]any{
+	tools := []map[string]any{
 		{
 			"name":        "record_access",
 			"description": "Record that the agent accessed a memory/decision item. Builds the real access stream Matrix Sentry's predictive allocation learns from. Provide one of: 'item' (a stable integer id, for synthetic streams), 'path' (a file path, mapped to a stable sequential id server-side), or 'paths' (a batch of file paths from one tool use). 'src' tags the originating tool.",
@@ -1032,6 +1034,7 @@ func toolList() []map[string]any {
 			},
 		},
 	}
+	return append(providerToolDefinitions(), tools...)
 }
 
 func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
@@ -1043,6 +1046,8 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		return s.fail(req.ID, -32602, "invalid params")
 	}
 	switch p.Name {
+	case "provider_list", "provider_status":
+		return s.handleProviderTool(req.ID, tenant, p.Name, p.Args)
 	case "record_access":
 		src, _ := strArg(p.Args, "src")
 		paths := pathArgs(p.Args)
