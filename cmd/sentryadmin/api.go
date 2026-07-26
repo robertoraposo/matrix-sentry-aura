@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -127,15 +128,15 @@ func (a *apiServer) handleComms(w http.ResponseWriter, r *http.Request) {
 }
 
 type commsCard struct {
-	ID        uint64 `json:"id"`
-	Author    string `json:"author"`
-	Type      string `json:"type"`
-	TypeColor string `json:"typeColor"`
-	Target    string `json:"target"`
-	Text      string `json:"text"`
-	Mins      int    `json:"mins"`
-	Reply     bool   `json:"reply"`
-	Promotable bool  `json:"promotable"`
+	ID         uint64 `json:"id"`
+	Author     string `json:"author"`
+	Type       string `json:"type"`
+	TypeColor  string `json:"typeColor"`
+	Target     string `json:"target"`
+	Text       string `json:"text"`
+	Mins       int    `json:"mins"`
+	Reply      bool   `json:"reply"`
+	Promotable bool   `json:"promotable"`
 }
 type commsColumn struct {
 	Key   string      `json:"key"`
@@ -256,10 +257,10 @@ type galaxyCluster struct {
 	Count  int        `json:"count"`
 }
 type tenantInfo struct {
-	Key    string   `json:"key"`
-	Name   string   `json:"name"`
-	Glyph  string   `json:"glyph"`
-	Accent string   `json:"accent"`
+	Key    string `json:"key"`
+	Name   string `json:"name"`
+	Glyph  string `json:"glyph"`
+	Accent string `json:"accent"`
 	// Agents must be non-empty: the dashboard's simulated journal indexes
 	// tenant.agents at random, so an empty/absent list crashes it. We surface
 	// the corpus's distinct sources as stand-in agent labels.
@@ -368,4 +369,86 @@ func deriveAgents(cr *corpusResp) []string {
 		return []string{"agent-self", "agent-recall"}
 	}
 	return agents
+}
+
+// handleProviders calls Matrix's provider_list MCP tool and returns only its
+// structured, credential-free result to the dashboard.
+func (a *apiServer) handleProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	payload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "provider_list",
+			"arguments": map[string]any{},
+		},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, `{"error":"request encoding"}`, http.StatusBadGateway)
+		return
+	}
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		a.mcpURL+"/mcp",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadGateway)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	if a.token != "" {
+		req.Header.Set("Authorization", "Bearer "+a.token)
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		http.Error(w, `{"error":"upstream"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, `{"error":"upstream"}`, http.StatusBadGateway)
+		return
+	}
+
+	var rpc struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+
+		Result struct {
+			IsError           bool            `json:"isError"`
+			StructuredContent json.RawMessage `json:"structuredContent"`
+		} `json:"result"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&rpc); err != nil {
+		http.Error(w, `{"error":"invalid upstream response"}`, http.StatusBadGateway)
+		return
+	}
+
+	if rpc.Error != nil ||
+		rpc.Result.IsError ||
+		len(rpc.Result.StructuredContent) == 0 ||
+		string(rpc.Result.StructuredContent) == "null" {
+		http.Error(w, `{"error":"provider query failed"}`, http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(rpc.Result.StructuredContent)
 }
