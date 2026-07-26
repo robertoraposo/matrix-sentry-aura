@@ -18,6 +18,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -129,6 +130,17 @@ func main() {
 		os.Exit(1)
 	}
 	s.chat.SetRetention(envInt("SENTRY_COMMS_RETAIN_N", 2000), time.Duration(envInt("SENTRY_COMMS_RETAIN_DAYS", 14))*24*time.Hour)
+	// Lifecycle-v2: claim lease length, presence staleness, owner override label,
+	// and the eager sweeper (all defaulted; each knob is backward-compatible).
+	s.chat.SetLeaseTTL(time.Duration(envInt("SENTRY_COMMS_LEASE_MIN", 15)) * time.Minute)
+	s.chat.SetPresenceStale(time.Duration(envInt("SENTRY_COMMS_PRESENCE_STALE_SEC", 900)) * time.Second)
+	s.chat.SetOwnerLabel(envOr("SENTRY_COMMS_OWNER_LABEL", ""))
+	// Sweeper on the process lifecycle context: eager lease/deadline/TTL/presence
+	// expiry even in a quiet channel. Nudges publish AFTER s.mu is released (Start
+	// preserves the lock-order invariant). Cancelled when main returns.
+	sweepCtx, cancelSweep := context.WithCancel(context.Background())
+	defer cancelSweep()
+	s.chat.Start(sweepCtx, time.Duration(envInt("SENTRY_COMMS_SWEEP_SEC", 30))*time.Second)
 
 	s.blobs, err = blob.Open(*dir)
 	if err != nil {
@@ -629,8 +641,12 @@ func (s *server) dispatch(line []byte, tenant sentry.TenantID) (rpcResp, bool) {
 
 	switch req.Method {
 	case "initialize":
+		var ip struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		_ = json.Unmarshal(req.Params, &ip)
 		return s.ok(req.ID, map[string]any{
-			"protocolVersion": protocolVersion,
+			"protocolVersion": negotiateVersion(ip.ProtocolVersion),
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "matrix-sentry", "version": "0.1.0"},
 		}), true
@@ -647,6 +663,21 @@ func (s *server) dispatch(line []byte, tenant sentry.TenantID) (rpcResp, bool) {
 			return rpcResp{}, false
 		}
 		return s.fail(req.ID, -32601, "method not found: "+req.Method), true
+	}
+}
+
+// taskFieldSchema is the outputSchema fragment for a message's task sub-object,
+// shared by read and inbox (state required; holder/leaseUntil/deadline optional).
+func taskFieldSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"state":      map[string]any{"type": "string", "description": "pending|claimed|done|cancel|overdue"},
+			"holder":     map[string]any{"type": "string"},
+			"leaseUntil": map[string]any{"type": "integer", "description": "unix nanos"},
+			"deadline":   map[string]any{"type": "integer", "description": "unix nanos; 0=none"},
+		},
+		"required": []any{"state"},
 	}
 }
 
@@ -701,6 +732,27 @@ func toolList() []map[string]any {
 				},
 				"required": []any{"query"},
 			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string"},
+					"count": map[string]any{"type": "integer", "description": "number of memories returned"},
+					"memories": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"id":       map[string]any{"type": "integer"},
+								"distance": map[string]any{"type": "number", "description": "squared-L2 distance, smaller=closer"},
+								"text":     map[string]any{"type": "string"},
+								"tags":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+							},
+							"required": []any{"id", "distance", "text"},
+						},
+					},
+				},
+				"required": []any{"query", "count", "memories"},
+			},
 		},
 		{
 			"name":        "forget",
@@ -715,16 +767,18 @@ func toolList() []map[string]any {
 		},
 		{
 			"name":        "post",
-			"description": "Post a message to a shared agent channel ('area') so other agents working the same project see it. Use kind=question to ask, kind=answer to reply (set ref to the question's #), kind=info to share, target to direct it at a specific agent (else broadcast).",
+			"description": "Post a message to a shared agent channel ('area') so other agents working the same project see it. Use kind=question to ask, kind=answer to reply (set ref to the question's #), kind=info to share, kind=task for a claimable unit of work (claim/resolve it), target to direct it at a specific agent (else broadcast). Optional ttl expires an ephemeral message; deadline (kind=task) flags it overdue when passed.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"area":   map[string]any{"type": "string", "description": "channel name, e.g. 'projX/backend' (agents agree on names)"},
-					"from":   map[string]any{"type": "string", "description": "your agent label, e.g. 'backend' or '01-core'"},
-					"text":   map[string]any{"type": "string", "description": "the message"},
-					"kind":   map[string]any{"type": "string", "description": "question | answer | info | note (default note)"},
-					"target": map[string]any{"type": "string", "description": "optional agent label to direct this at; empty = broadcast"},
-					"ref":    map[string]any{"type": "integer", "description": "optional message # this replies to"},
+					"area":     map[string]any{"type": "string", "description": "channel name, e.g. 'projX/backend' (agents agree on names)"},
+					"from":     map[string]any{"type": "string", "description": "your agent label, e.g. 'backend' or '01-core'"},
+					"text":     map[string]any{"type": "string", "description": "the message"},
+					"kind":     map[string]any{"type": "string", "description": "question | answer | info | note | task (default note)"},
+					"target":   map[string]any{"type": "string", "description": "optional agent label to direct this at; empty = broadcast"},
+					"ref":      map[string]any{"type": "integer", "description": "optional message # this replies to"},
+					"ttl":      map[string]any{"type": "string", "description": "optional lifetime as a duration ('90s', '10m', '2h', or integer seconds); the message drops out of the channel after it (journal is retained)"},
+					"deadline": map[string]any{"type": "string", "description": "optional deadline for a kind=task as a duration from now ('10m', '2h', integer seconds); the task flags overdue once passed"},
 				},
 				"required": []any{"area", "from", "text"},
 			},
@@ -740,6 +794,53 @@ func toolList() []map[string]any {
 					"target": map[string]any{"type": "string", "description": "optional: only messages directed at this label (plus broadcasts)"},
 				},
 				"required": []any{"area"},
+			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"area":   map[string]any{"type": "string"},
+					"target": map[string]any{"type": "string"},
+					"cursor": map[string]any{"type": "integer", "description": "highest # shown; use as the next since"},
+					"presence": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"agent":  map[string]any{"type": "string"},
+								"area":   map[string]any{"type": "string"},
+								"status": map[string]any{"type": "string"},
+								"ageSec": map[string]any{"type": "integer", "description": "seconds since the last heartbeat"},
+							},
+							"required": []any{"agent", "status", "ageSec"},
+						},
+					},
+					"messages": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"seq":    map[string]any{"type": "integer"},
+								"from":   map[string]any{"type": "string"},
+								"target": map[string]any{"type": "string", "description": "directed agent label; empty = broadcast"},
+								"kind":   map[string]any{"type": "string"},
+								"text":   map[string]any{"type": "string"},
+								"image": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"blob": map[string]any{"type": "string"},
+										"mime": map[string]any{"type": "string"},
+										"w":    map[string]any{"type": "integer"},
+										"h":    map[string]any{"type": "integer"},
+										"size": map[string]any{"type": "integer"},
+									},
+								},
+								"task": taskFieldSchema(),
+							},
+							"required": []any{"seq", "from", "kind", "text"},
+						},
+					},
+				},
+				"required": []any{"area", "cursor", "messages"},
 			},
 		},
 		{
@@ -761,6 +862,40 @@ func toolList() []map[string]any {
 					"since":  map[string]any{"type": "integer", "description": "return only messages with # greater than this (default 0 = all)"},
 				},
 				"required": []any{"target"},
+			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target": map[string]any{"type": "string"},
+					"count":  map[string]any{"type": "integer", "description": "number of messages returned"},
+					"cursor": map[string]any{"type": "integer", "description": "highest # shown; use as the next since"},
+					"messages": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"seq":    map[string]any{"type": "integer"},
+								"area":   map[string]any{"type": "string"},
+								"from":   map[string]any{"type": "string"},
+								"target": map[string]any{"type": "string", "description": "directed agent label; empty = broadcast"},
+								"kind":   map[string]any{"type": "string"},
+								"text":   map[string]any{"type": "string"},
+								"image": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"blob": map[string]any{"type": "string"},
+										"mime": map[string]any{"type": "string"},
+										"w":    map[string]any{"type": "integer"},
+										"h":    map[string]any{"type": "integer"},
+									},
+								},
+								"task": taskFieldSchema(),
+							},
+							"required": []any{"seq", "area", "from", "kind", "text"},
+						},
+					},
+				},
+				"required": []any{"target", "count", "cursor", "messages"},
 			},
 		},
 		{
@@ -827,9 +962,74 @@ func toolList() []map[string]any {
 			},
 		},
 		{
+			"name":        "claim",
+			"description": "Claim a task message (kind=task) so exactly one agent holds it. Atomic: the first caller wins; a second claim while the lease is live is DENIED. Re-claiming as the current holder renews the lease (doubles as a 'still working' heartbeat). An un-renewed lease auto-expires so hung tasks free up.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"seq": map[string]any{"type": "integer", "description": "the task message # to claim"},
+					"by":  map[string]any{"type": "string", "description": "your agent label — becomes the holder"},
+				},
+				"required": []any{"seq", "by"},
+			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"seq":        map[string]any{"type": "integer"},
+					"claimed":    map[string]any{"type": "boolean", "description": "true if you now hold it; false = DENIED (someone else holds a live lease)"},
+					"holder":     map[string]any{"type": "string", "description": "the live holder (you on success, the winner on DENIED)"},
+					"leaseUntil": map[string]any{"type": "integer", "description": "unix nanos the lease is held until"},
+					"state":      map[string]any{"type": "string", "description": "pending|claimed|done|cancel|overdue"},
+					"deadline":   map[string]any{"type": "integer", "description": "unix nanos; 0=none"},
+				},
+				"required": []any{"seq", "claimed", "holder", "leaseUntil", "state"},
+			},
+		},
+		{
+			"name":        "resolve",
+			"description": "Close a task you hold as done or cancel. Only the current holder (or the tenant owner) may resolve; a resolved task rejects further claims.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"seq":   map[string]any{"type": "integer", "description": "the task message # to resolve"},
+					"by":    map[string]any{"type": "string", "description": "your agent label — must be the holder (or owner)"},
+					"state": map[string]any{"type": "string", "description": "done | cancel (default done)"},
+				},
+				"required": []any{"seq", "by"},
+			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"seq":      map[string]any{"type": "integer"},
+					"resolved": map[string]any{"type": "boolean"},
+					"state":    map[string]any{"type": "string", "description": "done | cancel"},
+					"by":       map[string]any{"type": "string", "description": "the agent that resolved it"},
+				},
+				"required": []any{"seq", "resolved", "state", "by"},
+			},
+		},
+		{
+			"name":        "heartbeat",
+			"description": "Update your ephemeral presence slot (last-status-wins) instead of posting a STANDBY message. Creates NO channel message and is never journaled; read/inbox show live agents from these slots. Send periodically; the slot goes stale and disappears if you stop.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"from":   map[string]any{"type": "string", "description": "your agent label"},
+					"status": map[string]any{"type": "string", "description": "what you're doing, e.g. 'building', 'idle', 'running tests'"},
+					"area":   map[string]any{"type": "string", "description": "optional channel you're working in"},
+				},
+				"required": []any{"from", "status"},
+			},
+		},
+		{
 			"name":        "stats",
 			"description": "Return how many events are stored in the journal.",
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+			"outputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"events": map[string]any{"type": "integer", "description": "count of events stored in the journal"}},
+				"required":   []any{"events"},
+			},
 		},
 	}
 }
@@ -1002,7 +1202,7 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			s.recallMu.Unlock()
 		}
 		s.moko.Info("recall", map[string]string{"tenant": fmt.Sprint(tenant), "k": fmt.Sprint(k), "hits": fmt.Sprint(len(hits))})
-		return s.toolText(req.ID, formatRecall(query, hits))
+		return s.toolStruct(req.ID, formatRecall(query, hits), recallStruct(query, hits))
 	case "forget":
 		if s.mem == nil {
 			return s.toolErr(req.ID, "semantic memory disabled: no embedder configured (start sentrymcp with -ollama URL)")
@@ -1032,8 +1232,28 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		kind, _ := strArg(p.Args, "kind")
 		target, _ := strArg(p.Args, "target")
 		ref := uintArg(p.Args, "ref")
+		// Lifecycle-v2: optional ttl (→ExpiresAt) and deadline (→Deadline), both
+		// relative durations resolved to absolute unix-nanos from now. Invalid
+		// values are a tool error, never a silent never-expires.
+		now := time.Now()
+		exp, _, ttlErr := durArg(p.Args, "ttl", now)
+		if ttlErr != nil {
+			return s.toolErr(req.ID, "invalid ttl: "+ttlErr.Error())
+		}
+		dl, _, dlErr := durArg(p.Args, "deadline", now)
+		if dlErr != nil {
+			return s.toolErr(req.ID, "invalid deadline: "+dlErr.Error())
+		}
+		// Spec: a deadline is only recorded for kind=task. The deadline arg is still
+		// validated above for any kind (invalid → tool error, never a silent drop),
+		// but its value is applied only to tasks — a note/question/etc. records
+		// Deadline==0 regardless of what was passed. (ttl is unaffected: any kind.)
+		deadline := int64(0)
+		if kind == "task" {
+			deadline = dl
+		}
 		s.mu.Lock()
-		seq, err := s.chat.Post(tenant, comms.MessagePayload{Area: area, From: from, Kind: kind, Text: text, Target: target, Ref: ref})
+		seq, err := s.chat.Post(tenant, comms.MessagePayload{Area: area, From: from, Kind: kind, Text: text, Target: target, Ref: ref, ExpiresAt: exp, Deadline: deadline})
 		s.mu.Unlock()
 		if err != nil {
 			return s.toolErr(req.ID, "post failed: "+err.Error())
@@ -1052,9 +1272,19 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		if len(msgs) > readCap {
 			msgs = msgs[len(msgs)-readCap:]
 		}
+		now := time.Now()
 		var b strings.Builder
+		// Lifecycle-v2: prepend a compact presence section (nothing when no live
+		// agents → byte-identical to v1) before the message lines.
+		slots := s.chat.PresenceList(tenant)
+		writePresence(&b, slots, now)
 		var last uint64 = since
 		n := 0
+		// structuredContent (MCP 2025-06-18): mirror EXACTLY the data the text lines
+		// show — one entry per displayed message, with image/task sub-objects where
+		// the text carries an image line or a ⟨task⟩ suffix. Never nil so it marshals
+		// to a JSON array.
+		outMsgs := []map[string]any{}
 		for _, m := range msgs {
 			if target != "" && m.Target != "" && m.Target != target {
 				continue // filter: keep broadcasts + those addressed to target
@@ -1063,21 +1293,44 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			if to == "" {
 				to = "all"
 			}
+			sm := map[string]any{"seq": m.Seq, "from": m.From, "target": m.Target, "text": m.Text}
 			if m.BlobID != "" {
 				fmt.Fprintf(&b, "#%d [image] %s→%s: %s [%s %dx%d %dB · get_image(%d)]\n", m.Seq, m.From, to, m.Text, m.Mime, m.W, m.H, m.Size, m.Seq)
+				sm["kind"] = "image"
+				sm["image"] = map[string]any{"blob": m.BlobID, "mime": m.Mime, "w": m.W, "h": m.H, "size": m.Size}
 			} else {
-				fmt.Fprintf(&b, "#%d [%s] %s→%s: %s\n", m.Seq, m.Kind, m.From, to, m.Text)
+				// Task messages gain a live-state suffix; non-tasks (TaskOf ok=false)
+				// render byte-identical to v1.
+				fmt.Fprintf(&b, "#%d [%s] %s→%s: %s", m.Seq, m.Kind, m.From, to, m.Text)
+				sm["kind"] = m.Kind
+				if ts, ok := s.chat.TaskOf(tenant, m.Seq); ok {
+					b.WriteString(taskSuffix(ts))
+					sm["task"] = taskStruct(ts)
+				}
+				b.WriteByte('\n')
 			}
+			outMsgs = append(outMsgs, sm)
 			if m.Seq > last {
 				last = m.Seq
 			}
 			n++
 		}
+		structured := map[string]any{
+			"area":     area,
+			"cursor":   last,
+			"presence": presenceStruct(slots, now),
+			"messages": outMsgs,
+		}
+		if target != "" {
+			structured["target"] = target
+		}
 		if n == 0 {
-			return s.toolText(req.ID, fmt.Sprintf("no new messages in %s since #%d", area, since))
+			// No new messages: keep v1's exact text, only prefixed by presence (if any).
+			fmt.Fprintf(&b, "no new messages in %s since #%d", area, since)
+			return s.toolStruct(req.ID, b.String(), structured)
 		}
 		fmt.Fprintf(&b, "(cursor: #%d)", last)
-		return s.toolText(req.ID, b.String())
+		return s.toolStruct(req.ID, b.String(), structured)
 	case "comms_clear":
 		area, _ := strArg(p.Args, "area")
 		if area == "" {
@@ -1098,29 +1351,102 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 			inboxSince = uint64(v)
 		}
 		msgs := s.chat.Inbox(tenant, target, inboxSince)
+		now := time.Now()
 		var b strings.Builder
+		// Lifecycle-v2: prepend the presence section (empty → byte-identical to v1).
+		writePresence(&b, s.chat.PresenceList(tenant), now)
+		// structuredContent (MCP 2025-06-18): one entry per message (across areas),
+		// mirroring the text — image/task sub-objects where the text shows them. The
+		// inbox image line omits the byte size, so the image object does too.
+		cursor := inboxSince
+		outMsgs := []map[string]any{}
 		if len(msgs) == 0 {
 			fmt.Fprintf(&b, "inbox empty for %q (since #%d)", target, inboxSince)
 		} else {
 			fmt.Fprintf(&b, "%d message(s) for %q:\n", len(msgs), target)
-			cursor := inboxSince
 			for _, m := range msgs {
 				tgt := m.Target
 				if tgt == "" {
 					tgt = "all"
 				}
+				sm := map[string]any{"seq": m.Seq, "area": m.Area, "from": m.From, "target": m.Target, "text": m.Text}
 				if m.BlobID != "" {
 					fmt.Fprintf(&b, "#%d [image] %s→%s @%s: %s [%s %dx%d · get_image(%d)]\n", m.Seq, m.From, tgt, m.Area, m.Text, m.Mime, m.W, m.H, m.Seq)
+					sm["kind"] = "image"
+					sm["image"] = map[string]any{"blob": m.BlobID, "mime": m.Mime, "w": m.W, "h": m.H}
 				} else {
-					fmt.Fprintf(&b, "#%d [%s] %s→%s @%s: %s\n", m.Seq, m.Kind, m.From, tgt, m.Area, m.Text)
+					fmt.Fprintf(&b, "#%d [%s] %s→%s @%s: %s", m.Seq, m.Kind, m.From, tgt, m.Area, m.Text)
+					sm["kind"] = m.Kind
+					if ts, ok := s.chat.TaskOf(tenant, m.Seq); ok {
+						b.WriteString(taskSuffix(ts))
+						sm["task"] = taskStruct(ts)
+					}
+					b.WriteByte('\n')
 				}
+				outMsgs = append(outMsgs, sm)
 				if m.Seq > cursor {
 					cursor = m.Seq
 				}
 			}
 			fmt.Fprintf(&b, "(cursor: #%d)", cursor)
 		}
-		return s.toolText(req.ID, b.String())
+		return s.toolStruct(req.ID, b.String(), map[string]any{
+			"target":   target,
+			"cursor":   cursor,
+			"count":    len(msgs),
+			"messages": outMsgs,
+		})
+	case "claim":
+		seq := uintArg(p.Args, "seq")
+		by, _ := strArg(p.Args, "by")
+		if seq == 0 || by == "" {
+			return s.toolErr(req.ID, "provide 'seq' and 'by' to claim")
+		}
+		ts, ok, err := s.chat.Claim(tenant, seq, by, time.Now())
+		if err != nil {
+			return s.toolErr(req.ID, "claim failed: "+err.Error())
+		}
+		if !ok {
+			// DENIED is a normal outcome (someone else holds a live lease), not a
+			// tool error — report who holds it and until when.
+			s.moko.Info("claim", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "ok": "false", "holder": ts.Holder})
+			return s.toolStruct(req.ID,
+				fmt.Sprintf("DENIED: #%d held by %s until %s", seq, ts.Holder, time.Unix(0, ts.LeaseUntil).Format("15:04")),
+				map[string]any{"seq": seq, "claimed": false, "holder": ts.Holder, "leaseUntil": ts.LeaseUntil, "state": ts.State, "deadline": ts.Deadline})
+		}
+		s.moko.Info("claim", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "ok": "true"})
+		return s.toolStruct(req.ID,
+			fmt.Sprintf("claimed #%d by %s, lease until %s", seq, by, time.Unix(0, ts.LeaseUntil).Format("15:04")),
+			map[string]any{"seq": seq, "claimed": true, "holder": ts.Holder, "leaseUntil": ts.LeaseUntil, "state": ts.State, "deadline": ts.Deadline})
+	case "resolve":
+		seq := uintArg(p.Args, "seq")
+		by, _ := strArg(p.Args, "by")
+		if seq == 0 || by == "" {
+			return s.toolErr(req.ID, "provide 'seq' and 'by' to resolve")
+		}
+		state, _ := strArg(p.Args, "state")
+		if state == "" {
+			state = "done"
+		}
+		if err := s.chat.Resolve(tenant, seq, by, state, time.Now()); err != nil {
+			return s.toolErr(req.ID, "resolve failed: "+err.Error())
+		}
+		s.moko.Info("resolve", map[string]string{"tenant": fmt.Sprint(tenant), "seq": fmt.Sprint(seq), "by": by, "state": state})
+		return s.toolStruct(req.ID,
+			fmt.Sprintf("resolved #%d as %s", seq, state),
+			map[string]any{"seq": seq, "resolved": true, "state": state, "by": by})
+	case "heartbeat":
+		from, _ := strArg(p.Args, "from")
+		status, _ := strArg(p.Args, "status")
+		if from == "" || status == "" {
+			return s.toolErr(req.ID, "provide 'from' and 'status' to heartbeat")
+		}
+		area, _ := strArg(p.Args, "area")
+		if err := s.chat.Heartbeat(tenant, from, area, status, time.Now()); err != nil {
+			return s.toolErr(req.ID, "heartbeat failed: "+err.Error())
+		}
+		s.moko.Info("heartbeat", map[string]string{"tenant": fmt.Sprint(tenant), "from": from, "area": area})
+		return s.toolText(req.ID, fmt.Sprintf("presence updated for %s", from))
 	case "post_image":
 		area, _ := strArg(p.Args, "area")
 		from, _ := strArg(p.Args, "from")
@@ -1245,9 +1571,132 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		s.moko.Info("promote", map[string]string{"tenant": fmt.Sprint(tenant), "area": area, "seq": fmt.Sprint(seq), "memid": fmt.Sprint(id)})
 		return s.toolText(req.ID, fmt.Sprintf("promoted message #%d in %s → memory #%d", seq, area, id))
 	case "stats":
-		return s.toolText(req.ID, fmt.Sprintf("journal holds %d events", s.store.ReadNextSeq()-1))
+		events := uint64(s.store.ReadNextSeq() - 1)
+		return s.toolStruct(req.ID,
+			fmt.Sprintf("journal holds %d events", events),
+			map[string]any{"events": events})
 	default:
 		return s.toolErr(req.ID, "unknown tool: "+p.Name)
+	}
+}
+
+// writePresence prepends the lifecycle-v2 presence section to b — one line per
+// live agent: "~ <agent> [<area>]: <status> (<age>)". The bracketed area is
+// omitted when empty. Nothing is written when there are no live slots, so a
+// channel with no presence renders byte-identical to v1.
+func writePresence(b *strings.Builder, slots []comms.Presence, now time.Time) {
+	for _, p := range slots {
+		b.WriteString("~ ")
+		b.WriteString(p.Agent)
+		if p.Area != "" {
+			b.WriteString(" [")
+			b.WriteString(p.Area)
+			b.WriteByte(']')
+		}
+		b.WriteString(": ")
+		b.WriteString(p.Status)
+		fmt.Fprintf(b, " (%s)\n", compactAge(now.UnixNano()-p.TS))
+	}
+}
+
+// taskSuffix renders a task message's live-state suffix, e.g.
+//
+//	"  ⟨claimed by backend-2 · lease 12:40 · due 12:55⟩"
+//
+// It is appended to a task's message line by read/inbox. A zero/empty state
+// yields "" so non-task messages (TaskOf ok=false, or a never-seeded seq) render
+// byte-identical to v1. claimed/overdue show holder + lease; pending/done/cancel
+// show the bare state; a deadline is appended for any non-terminal task.
+func taskSuffix(ts comms.TaskState) string {
+	if ts.State == "" {
+		return ""
+	}
+	var parts []string
+	switch ts.State {
+	case "claimed", "overdue":
+		if ts.Holder != "" {
+			parts = append(parts, ts.State+" by "+ts.Holder)
+		} else {
+			parts = append(parts, ts.State)
+		}
+		if ts.LeaseUntil > 0 {
+			parts = append(parts, "lease "+time.Unix(0, ts.LeaseUntil).Format("15:04"))
+		}
+	default: // pending, done, cancel
+		parts = append(parts, ts.State)
+	}
+	if ts.Deadline > 0 && ts.State != "done" && ts.State != "cancel" {
+		parts = append(parts, "due "+time.Unix(0, ts.Deadline).Format("15:04"))
+	}
+	return "  ⟨" + strings.Join(parts, " · ") + "⟩"
+}
+
+// presenceStruct builds the structuredContent presence array from the same live
+// slots writePresence renders — {agent, status, ageSec} plus area when set. ageSec
+// is the whole-seconds age (clamped at 0 for clock skew) of compactAge's input, so
+// the structured value tracks the human "(<age>)" the text shows. Never nil.
+func presenceStruct(slots []comms.Presence, now time.Time) []map[string]any {
+	out := []map[string]any{}
+	for _, p := range slots {
+		age := (now.UnixNano() - p.TS) / int64(time.Second)
+		if age < 0 {
+			age = 0
+		}
+		e := map[string]any{"agent": p.Agent, "status": p.Status, "ageSec": age}
+		if p.Area != "" {
+			e["area"] = p.Area
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// taskStruct builds the structuredContent task object for a message whose text
+// carries a ⟨task⟩ suffix (TaskOf ok). It mirrors taskSuffix's data: state always;
+// holder/leaseUntil/deadline only when present (holder set, lease/deadline > 0).
+func taskStruct(ts comms.TaskState) map[string]any {
+	m := map[string]any{"state": ts.State}
+	if ts.Holder != "" {
+		m["holder"] = ts.Holder
+	}
+	if ts.LeaseUntil > 0 {
+		m["leaseUntil"] = ts.LeaseUntil
+	}
+	if ts.Deadline > 0 {
+		m["deadline"] = ts.Deadline
+	}
+	return m
+}
+
+// recallStruct builds the structuredContent for recall — {query, count, memories}
+// — mirroring formatRecall: each memory carries id/distance/text, and tags only
+// when non-empty (the text shows tags only then). distance is the squared-L2 score.
+func recallStruct(query string, hits []memory.Memory) map[string]any {
+	mems := []map[string]any{}
+	for _, h := range hits {
+		m := map[string]any{"id": h.ID, "distance": float64(h.Score), "text": h.Text}
+		if len(h.Tags) > 0 {
+			m["tags"] = h.Tags
+		}
+		mems = append(mems, m)
+	}
+	return map[string]any{"query": query, "count": len(hits), "memories": mems}
+}
+
+// compactAge renders a nanosecond age as a short human string (0s, 45s, 12m, 3h).
+// A negative age (clock skew) clamps to 0s.
+func compactAge(ns int64) string {
+	d := time.Duration(ns)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 }
 
@@ -1388,6 +1837,61 @@ func pathArgs(args map[string]any) []string {
 	return out
 }
 
+// parseDur parses the lifecycle-v2 duration grammar: a bare integer is seconds
+// ("5" = 5s); otherwise the standard suffixed form ("90s", "10m", "2h", "1h30m").
+// Junk is an error so an invalid ttl/deadline is never silently treated as 0.
+func parseDur(s string) (time.Duration, error) {
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q (use 90s, 10m, 2h, or integer seconds)", s)
+	}
+	return d, nil
+}
+
+// durArg reads the ttl/deadline arg (a relative duration) and returns it as an
+// ABSOLUTE unix-nanos deadline from now. Absent or "" → (0, false, nil) meaning
+// "no expiry". A duration string ("90s"/"10m"/"2h") or a bare/JSON integer of
+// seconds → (now+dur, true, nil). Anything unparseable → (0, false, error) so a
+// bad value surfaces as a tool error instead of a silent never-expires.
+func durArg(args map[string]any, key string, now time.Time) (int64, bool, error) {
+	raw, present := args[key]
+	if !present {
+		return 0, false, nil
+	}
+	var d time.Duration
+	switch v := raw.(type) {
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, false, nil
+		}
+		var err error
+		if d, err = parseDur(s); err != nil {
+			return 0, false, err
+		}
+	case float64:
+		if v <= 0 {
+			return 0, false, nil
+		}
+		d = time.Duration(v) * time.Second
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, false, fmt.Errorf("invalid duration for %q: %v", key, err)
+		}
+		if n <= 0 {
+			return 0, false, nil
+		}
+		d = time.Duration(n) * time.Second
+	default:
+		return 0, false, fmt.Errorf("%q must be a duration string (90s|10m|2h) or integer seconds", key)
+	}
+	return now.Add(d).UnixNano(), true, nil
+}
+
 func (s *server) ok(id json.RawMessage, result any) rpcResp {
 	return rpcResp{JSONRPC: "2.0", ID: id, Result: result}
 }
@@ -1396,6 +1900,32 @@ func (s *server) fail(id json.RawMessage, code int, msg string) rpcResp {
 }
 func (s *server) toolText(id json.RawMessage, text string) rpcResp {
 	return s.ok(id, map[string]any{"content": []map[string]any{{"type": "text", "text": text}}})
+}
+
+// toolStruct returns a tool result carrying BOTH the human-readable text content
+// block (byte-identical to what toolText would emit, so 2024-11-05 clients see
+// no change) AND a structuredContent value (MCP 2025-06-18). Ship this only for
+// tools that declare an outputSchema; structured MUST validate against it.
+func (s *server) toolStruct(id json.RawMessage, text string, structured any) rpcResp {
+	return s.ok(id, map[string]any{
+		"content":           []map[string]any{{"type": "text", "text": text}},
+		"structuredContent": structured,
+	})
+}
+
+// negotiateVersion picks the protocolVersion to echo in initialize. If the
+// client requested a version we support, echo exactly that — a 2024-11-05 client
+// MUST keep getting 2024-11-05 so nothing changes for it. Anything else
+// (unspecified, unknown, or newer than we know) negotiates down to the newest
+// version we support. protocolVersion (the const) remains the compatibility
+// floor/default the server is built around.
+func negotiateVersion(requested string) string {
+	switch requested {
+	case "2025-06-18", protocolVersion:
+		return requested
+	default:
+		return "2025-06-18"
+	}
 }
 func (s *server) toolErr(id json.RawMessage, text string) rpcResp {
 	return s.ok(id, map[string]any{"content": []map[string]any{{"type": "text", "text": text}}, "isError": true})
