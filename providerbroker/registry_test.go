@@ -98,3 +98,65 @@ func TestSetStatusRejectsUnknownProvider(t *testing.T) {
 		t.Fatal("status accepted for unknown provider")
 	}
 }
+
+func TestDefaultStatusAppliesToEveryTenant(t *testing.T) {
+	r := NewRegistry()
+
+	if err := r.Register(Provider{
+		ID:   "ollama",
+		Name: "Ollama local",
+		Auth: AuthNone,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.SetDefaultStatus("ollama", Status{
+		State:   StateConnected,
+		Account: "local",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tenant := range []sentry.TenantID{1, 2, 99} {
+		got, ok := r.Status(tenant, "ollama")
+		if !ok {
+			t.Fatalf("tenant %d: provider not found", tenant)
+		}
+		if got.State != StateConnected || got.Account != "local" {
+			t.Fatalf("tenant %d: status = %+v", tenant, got)
+		}
+	}
+}
+
+func TestTenantStatusOverridesDefaultStatus(t *testing.T) {
+	r := NewRegistry()
+
+	if err := r.Register(Provider{
+		ID:   "ollama",
+		Name: "Ollama local",
+		Auth: AuthNone,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.SetDefaultStatus("ollama", Status{
+		State:   StateConnected,
+		Account: "local",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.SetStatus(7, "ollama", Status{
+		State: StateDisconnected,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := r.Status(7, "ollama")
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.State != StateDisconnected {
+		t.Fatalf("tenant override ignored: %+v", got)
+	}
+}
