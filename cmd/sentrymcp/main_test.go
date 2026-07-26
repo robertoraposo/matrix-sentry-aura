@@ -855,6 +855,169 @@ func TestCommsSubscribeMissingFilter(t *testing.T) {
 	}
 }
 
+// --- lifecycle-v2 MCP tools (Task 5): post ttl/deadline + claim/resolve/heartbeat ---
+
+func TestPostTTLSetsExpiry(t *testing.T) {
+	s := newMemServer(t)
+	now := time.Now()
+	resp := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "be", "text": "ephemeral", "ttl": "10m"})
+	seq := extractSeq(t, resp)
+	m, ok := s.chat.GetBySeq(s.tenant, seq)
+	if !ok {
+		t.Fatalf("message #%d not found after post", seq)
+	}
+	if m.ExpiresAt == 0 {
+		t.Fatal("ttl=10m did not set ExpiresAt")
+	}
+	want := now.Add(10 * time.Minute).UnixNano()
+	if diff := m.ExpiresAt - want; diff < -int64(time.Minute) || diff > int64(time.Minute) {
+		t.Fatalf("ExpiresAt = %d, want ≈ %d (diff %v)", m.ExpiresAt, want, time.Duration(diff))
+	}
+}
+
+func TestClaimToolAtomic(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task"})
+	seq := extractSeq(t, post)
+
+	a := respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"}))
+	if !strings.Contains(a, "claimed") {
+		t.Fatalf("A's claim should succeed: %s", a)
+	}
+	// B's claim of a live-leased task is a normal (non-error) DENIED text.
+	b := respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "B"}))
+	if !strings.Contains(b, "DENIED") {
+		t.Fatalf("B's claim of a held task should be DENIED: %s", b)
+	}
+}
+
+func TestResolveTool(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "do it", "kind": "task"})
+	seq := extractSeq(t, post)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"}))
+
+	r := respText(t, callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "A", "state": "done"}))
+	if !strings.Contains(r, "resolved") {
+		t.Fatalf("holder resolve should succeed: %s", r)
+	}
+	// A resolved task is terminal → further claim DENIED.
+	b := respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "B"}))
+	if !strings.Contains(b, "DENIED") {
+		t.Fatalf("claim after resolve should be DENIED (terminal): %s", b)
+	}
+	// non-holder resolve is a tool error.
+	if !isToolError(callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "C"})) {
+		t.Fatal("non-holder resolve should be a tool error")
+	}
+}
+
+func TestHeartbeatToolNoMessage(t *testing.T) {
+	s := newMemServer(t)
+	before := len(s.chat.Recent(s.tenant, 0))
+	txt := respText(t, callNamed(s, "heartbeat", map[string]any{"from": "worker-1", "status": "building", "area": "proj/x"}))
+	if !strings.Contains(txt, "presence updated") {
+		t.Fatalf("heartbeat response: %s", txt)
+	}
+	if after := len(s.chat.Recent(s.tenant, 0)); after != before {
+		t.Fatalf("heartbeat created a message: before=%d after=%d", before, after)
+	}
+	if got := s.chat.PresenceList(s.tenant); len(got) != 1 || got[0].Status != "building" {
+		t.Fatalf("presence slot not set correctly: %+v", got)
+	}
+}
+
+func TestDurArg(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	// absent → none
+	if v, ok, err := durArg(map[string]any{}, "ttl", now); err != nil || ok || v != 0 {
+		t.Fatalf("absent: (%d,%v,%v), want (0,false,nil)", v, ok, err)
+	}
+	// empty string → none
+	if v, ok, err := durArg(map[string]any{"ttl": ""}, "ttl", now); err != nil || ok || v != 0 {
+		t.Fatalf("empty: (%d,%v,%v), want (0,false,nil)", v, ok, err)
+	}
+	for _, c := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"90s", 90 * time.Second},
+		{"10m", 10 * time.Minute},
+		{"2h", 2 * time.Hour},
+		{"5", 5 * time.Second}, // bare integer = seconds
+	} {
+		v, ok, err := durArg(map[string]any{"ttl": c.in}, "ttl", now)
+		if err != nil || !ok {
+			t.Fatalf("%q: (%d,%v,%v), want (abs,true,nil)", c.in, v, ok, err)
+		}
+		if want := now.Add(c.want).UnixNano(); v != want {
+			t.Fatalf("%q: v=%d want=%d", c.in, v, want)
+		}
+	}
+	// junk → error, never a silent 0
+	if v, ok, err := durArg(map[string]any{"ttl": "nope"}, "ttl", now); err == nil || ok || v != 0 {
+		t.Fatalf("junk: (%d,%v,%v), want (0,false,err)", v, ok, err)
+	}
+}
+
+func TestLifecycleToolsListed(t *testing.T) {
+	names := map[string]bool{}
+	for _, tl := range toolList() {
+		names[tl["name"].(string)] = true
+	}
+	for _, want := range []string{"claim", "resolve", "heartbeat"} {
+		if !names[want] {
+			t.Fatalf("tool %q not advertised in tools/list", want)
+		}
+	}
+}
+
+// --- lifecycle-v2 render (Task 6): presence section + task-state suffix in read/inbox ---
+
+func TestReadShowsPresenceAndTaskState(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	// A heartbeat populates a presence slot (no channel message).
+	respText(t, callNamed(s, "heartbeat", map[string]any{"from": "worker-2", "status": "building", "area": "proj/x"}))
+	// A claimed task should render its live state as a suffix.
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task"})
+	seq := extractSeq(t, post)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "worker-2"}))
+
+	txt := respText(t, callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0}))
+	if !strings.Contains(txt, "~ worker-2") {
+		t.Fatalf("read should prepend a presence line for worker-2:\n%s", txt)
+	}
+	if !strings.Contains(txt, "⟨claimed by worker-2") {
+		t.Fatalf("read should append the ⟨claimed by …⟩ task-state suffix:\n%s", txt)
+	}
+	// inbox (directed) renders the same way.
+	respText(t, callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "for you", "kind": "task", "target": "worker-2"}))
+	inbox := respText(t, callNamed(s, "inbox", map[string]any{"target": "worker-2"}))
+	if !strings.Contains(inbox, "~ worker-2") {
+		t.Fatalf("inbox should prepend a presence line:\n%s", inbox)
+	}
+}
+
+func TestReadBackwardCompatPlainMessage(t *testing.T) {
+	s := newMemServer(t)
+	// A plain note with no presence and no task state must render byte-identical to v1.
+	seq, err := s.chat.Post(s.tenant, comms.MessagePayload{Area: "proj/x", From: "be", Text: "schema ready", Kind: "note"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt := respText(t, callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0}))
+	exact := fmt.Sprintf("#%d [note] be→all: schema ready\n(cursor: #%d)", seq, seq)
+	if txt != exact {
+		t.Fatalf("plain render not byte-identical to v1:\n got: %q\nwant: %q", txt, exact)
+	}
+	if strings.Contains(txt, "~ ") || strings.Contains(txt, "⟨") {
+		t.Fatalf("plain render must carry no presence/task markers:\n%s", txt)
+	}
+}
+
 func TestHandleDownloadTraversalGuard(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SENTRY_DL_DIR", dir)
@@ -885,5 +1048,501 @@ func TestHandleDownloadTraversalGuard(t *testing.T) {
 	s.handleInstallScript(rec, httptest.NewRequest("GET", "/install.sh", nil))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "echo hi") {
 		t.Fatalf("install.sh: code=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// --- lifecycle-v2 acceptance surfaces (deadline-scope, overdue render, owner
+// override, presence dedup) exercised through the MCP tool + render paths ---
+
+// TestPostDeadlineOnlyForTask pins the spec: a deadline is recorded ONLY for
+// kind=task. A kind=note post carrying a deadline must store Deadline==0, while
+// the same deadline on a kind=task post is resolved to an absolute nanos ≈ now+d.
+func TestPostDeadlineOnlyForTask(t *testing.T) {
+	s := newMemServer(t)
+	now := time.Now()
+
+	// kind=note + deadline → Deadline NOT recorded.
+	noteSeq := extractSeq(t, callNamed(s, "post", map[string]any{
+		"area": "proj/x", "from": "be", "text": "just a note", "kind": "note", "deadline": "5m",
+	}))
+	nm, ok := s.chat.GetBySeq(s.tenant, noteSeq)
+	if !ok {
+		t.Fatalf("note #%d not found after post", noteSeq)
+	}
+	if nm.Deadline != 0 {
+		t.Fatalf("kind=note must not record a deadline, got Deadline=%d", nm.Deadline)
+	}
+
+	// kind=task + the same deadline → Deadline ≈ now+5m.
+	taskSeq := extractSeq(t, callNamed(s, "post", map[string]any{
+		"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task", "deadline": "5m",
+	}))
+	tm, ok := s.chat.GetBySeq(s.tenant, taskSeq)
+	if !ok {
+		t.Fatalf("task #%d not found after post", taskSeq)
+	}
+	want := now.Add(5 * time.Minute).UnixNano()
+	if diff := tm.Deadline - want; diff < -int64(time.Minute) || diff > int64(time.Minute) {
+		t.Fatalf("kind=task Deadline = %d, want ≈ %d (diff %v)", tm.Deadline, want, time.Duration(diff))
+	}
+}
+
+// TestReadRendersOverdueTask drives a past-deadline task to overdue via the eager
+// sweeper and asserts BOTH read and inbox render the overdue task-state suffix.
+func TestReadRendersOverdueTask(t *testing.T) {
+	s := newMemServer(t)
+	// Post directly so we can set an absolute PAST deadline — the post tool accepts
+	// only forward-relative durations. Target lets the same message serve inbox too.
+	past := time.Now().Add(-time.Hour).UnixNano()
+	seq, err := s.chat.Post(s.tenant, comms.MessagePayload{
+		Area: "proj/x", From: "lead", Text: "late task", Kind: "task",
+		Target: "worker-9", Deadline: past,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// sweepOnce is unexported (package comms); drive the exported eager sweeper on a
+	// fast tick until it flips the past-deadline task to overdue, then stop it (an
+	// overdue task is not re-flipped, so its state stays stable for the assertions).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.chat.Start(ctx, time.Millisecond)
+	until := time.Now().Add(2 * time.Second)
+	for {
+		if ts, ok := s.chat.TaskOf(s.tenant, seq); ok && ts.State == "overdue" {
+			break
+		}
+		if time.Now().After(until) {
+			t.Fatalf("task #%d never became overdue", seq)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	rd := respText(t, callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0}))
+	if !strings.Contains(rd, "overdue") {
+		t.Fatalf("read should render the overdue task-state suffix:\n%s", rd)
+	}
+	ib := respText(t, callNamed(s, "inbox", map[string]any{"target": "worker-9"}))
+	if !strings.Contains(ib, "overdue") {
+		t.Fatalf("inbox should render the overdue task-state suffix:\n%s", ib)
+	}
+}
+
+// TestResolveOwnerOverrideViaTool covers the SENTRY_COMMS_OWNER_LABEL override
+// through the resolve tool: the owner label may resolve a task it does not hold,
+// while a non-owner non-holder is rejected.
+func TestResolveOwnerOverrideViaTool(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	s.chat.SetOwnerLabel("alvin") // mirrors envOr("SENTRY_COMMS_OWNER_LABEL", "") at startup
+
+	seq := extractSeq(t, callNamed(s, "post", map[string]any{
+		"area": "proj/x", "from": "lead", "text": "stuck task", "kind": "task",
+	}))
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"}))
+
+	// A non-owner, non-holder resolve is rejected (tool error).
+	if !isToolError(callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "C", "state": "done"})) {
+		t.Fatal("non-owner non-holder resolve must be rejected")
+	}
+	// The owner label (NOT the holder A) may override-resolve.
+	r := respText(t, callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "alvin", "state": "done"}))
+	if !strings.Contains(r, "resolved") {
+		t.Fatalf("owner override resolve should succeed: %s", r)
+	}
+	// Resolved → terminal: any further claim is DENIED.
+	b := respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "B"}))
+	if !strings.Contains(b, "DENIED") {
+		t.Fatalf("resolved task must be terminal (claim DENIED): %s", b)
+	}
+}
+
+// TestHeartbeatRendersOneLine asserts presence is last-wins per agent: N
+// heartbeats from ONE agent collapse to exactly ONE "~ <agent>" render line in
+// both read and inbox, showing the newest status.
+func TestHeartbeatRendersOneLine(t *testing.T) {
+	s := newMemServer(t)
+	for _, st := range []string{"starting", "building", "testing"} {
+		respText(t, callNamed(s, "heartbeat", map[string]any{"from": "worker-1", "status": st, "area": "proj/x"}))
+	}
+
+	rd := respText(t, callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0}))
+	if got := strings.Count(rd, "~ worker-1"); got != 1 {
+		t.Fatalf("read presence lines for worker-1 = %d, want exactly 1:\n%s", got, rd)
+	}
+	if got := strings.Count(rd, "~ "); got != 1 {
+		t.Fatalf("read total presence lines = %d, want exactly 1:\n%s", got, rd)
+	}
+	if !strings.Contains(rd, "testing") {
+		t.Fatalf("read presence should show the newest status 'testing' (last-wins):\n%s", rd)
+	}
+
+	ib := respText(t, callNamed(s, "inbox", map[string]any{"target": "worker-1"}))
+	if got := strings.Count(ib, "~ worker-1"); got != 1 {
+		t.Fatalf("inbox presence lines for worker-1 = %d, want exactly 1:\n%s", got, ib)
+	}
+}
+
+// --- outputSchema + structuredContent (MCP 2025-06-18) + protocol negotiation ---
+
+// respStruct extracts the structuredContent map from a tool result, failing if
+// it is absent. It does NOT require isError to be unset (DENIED claim carries
+// structuredContent with claimed:false and isError=false).
+func respStruct(t *testing.T, r rpcResp) map[string]any {
+	t.Helper()
+	m, ok := r.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("respStruct: result not a map: %#v", r.Result)
+	}
+	sc, ok := m["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("respStruct: no structuredContent map in result: %#v", m)
+	}
+	return sc
+}
+
+// outputSchemaOf returns the outputSchema advertised for a tool, or nil.
+func outputSchemaOf(t *testing.T, name string) map[string]any {
+	t.Helper()
+	for _, tl := range toolList() {
+		if tl["name"] == name {
+			os, _ := tl["outputSchema"].(map[string]any)
+			return os
+		}
+	}
+	t.Fatalf("outputSchemaOf: tool %q not found", name)
+	return nil
+}
+
+func TestNegotiateVersion(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"2024-11-05", "2024-11-05"}, // old client keeps its version
+		{"2025-06-18", "2025-06-18"}, // new client gets the new version
+		{"", "2025-06-18"},           // unspecified → newest supported
+		{"garbage", "2025-06-18"},    // unsupported → newest supported
+		{"2099-01-01", "2025-06-18"}, // future/unknown → newest supported
+	} {
+		if got := negotiateVersion(c.in); got != c.want {
+			t.Errorf("negotiateVersion(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestInitializeNegotiatesProtocolVersion(t *testing.T) {
+	s := newMemServer(t)
+	check := func(line, want string) {
+		t.Helper()
+		resp, ok := s.dispatch([]byte(line), s.tenant)
+		if !ok {
+			t.Fatalf("dispatch returned no response for %s", line)
+		}
+		m, ok := resp.Result.(map[string]any)
+		if !ok {
+			t.Fatalf("initialize result not a map: %#v", resp.Result)
+		}
+		if got := m["protocolVersion"]; got != want {
+			t.Fatalf("initialize echoed protocolVersion=%v, want %q (req=%s)", got, want, line)
+		}
+	}
+	check(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`, "2024-11-05")
+	check(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`, "2025-06-18")
+	check(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"garbage"}}`, "2025-06-18")
+	check(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, "2025-06-18")
+}
+
+func TestStatsStructuredContent(t *testing.T) {
+	s := newMemServer(t)
+	respText(t, callNamed(s, "remember", map[string]any{"text": "a durable fact"}))
+	wantEvents := uint64(s.store.ReadNextSeq() - 1)
+
+	r := callNamed(s, "stats", map[string]any{})
+	// text MUST stay byte-identical to v1.
+	txt := respText(t, r)
+	wantText := fmt.Sprintf("journal holds %d events", wantEvents)
+	if txt != wantText {
+		t.Fatalf("stats text changed: got %q want %q", txt, wantText)
+	}
+	sc := respStruct(t, r)
+	got, ok := sc["events"].(uint64)
+	if !ok {
+		t.Fatalf("stats structuredContent.events not uint64: %#v", sc["events"])
+	}
+	if got != wantEvents {
+		t.Fatalf("stats structuredContent.events = %d, want %d", got, wantEvents)
+	}
+	if outputSchemaOf(t, "stats") == nil {
+		t.Fatal("stats tool must advertise an outputSchema")
+	}
+}
+
+func TestClaimStructuredContentOKAndDenied(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task"})
+	seq := extractSeq(t, post)
+
+	// OK claim: text byte-identical shape + structuredContent.
+	okResp := callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"})
+	okText := respText(t, okResp)
+	if !strings.Contains(okText, "claimed") || strings.Contains(okText, "DENIED") {
+		t.Fatalf("claim OK text unexpected: %q", okText)
+	}
+	sc := respStruct(t, okResp)
+	if sc["seq"].(uint64) != seq {
+		t.Fatalf("claim seq = %v, want %d", sc["seq"], seq)
+	}
+	if sc["claimed"] != true {
+		t.Fatalf("claim claimed = %v, want true", sc["claimed"])
+	}
+	if sc["holder"] != "A" {
+		t.Fatalf("claim holder = %v, want A", sc["holder"])
+	}
+	if sc["state"] != "claimed" {
+		t.Fatalf("claim state = %v, want claimed", sc["state"])
+	}
+	lu, ok := sc["leaseUntil"].(int64)
+	if !ok || lu <= 0 {
+		t.Fatalf("claim leaseUntil should be a positive int64 lease ts, got %#v", sc["leaseUntil"])
+	}
+
+	// DENIED claim: NOT a tool error, claimed:false, holder is the live winner.
+	denResp := callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "B"})
+	if isToolError(denResp) {
+		t.Fatal("DENIED claim must NOT be a tool error (isError must be unset)")
+	}
+	denText := respText(t, denResp)
+	if !strings.Contains(denText, "DENIED") {
+		t.Fatalf("claim DENIED text unexpected: %q", denText)
+	}
+	dsc := respStruct(t, denResp)
+	if dsc["claimed"] != false {
+		t.Fatalf("denied claimed = %v, want false", dsc["claimed"])
+	}
+	if dsc["holder"] != "A" {
+		t.Fatalf("denied holder = %v, want A (the live holder)", dsc["holder"])
+	}
+	if dsc["seq"].(uint64) != seq {
+		t.Fatalf("denied seq = %v, want %d", dsc["seq"], seq)
+	}
+	if outputSchemaOf(t, "claim") == nil {
+		t.Fatal("claim tool must advertise an outputSchema")
+	}
+}
+
+func TestResolveStructuredContent(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "do it", "kind": "task"})
+	seq := extractSeq(t, post)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "A"}))
+
+	r := callNamed(s, "resolve", map[string]any{"seq": float64(seq), "by": "A", "state": "done"})
+	txt := respText(t, r)
+	want := fmt.Sprintf("resolved #%d as done", seq)
+	if txt != want {
+		t.Fatalf("resolve text changed: got %q want %q", txt, want)
+	}
+	sc := respStruct(t, r)
+	if sc["seq"].(uint64) != seq {
+		t.Fatalf("resolve seq = %v, want %d", sc["seq"], seq)
+	}
+	if sc["resolved"] != true {
+		t.Fatalf("resolve resolved = %v, want true", sc["resolved"])
+	}
+	if sc["state"] != "done" {
+		t.Fatalf("resolve state = %v, want done", sc["state"])
+	}
+	if sc["by"] != "A" {
+		t.Fatalf("resolve by = %v, want A", sc["by"])
+	}
+
+	// default state ("" → done) also reflected in structuredContent.
+	post2 := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "do it 2", "kind": "task"})
+	seq2 := extractSeq(t, post2)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq2), "by": "A"}))
+	r2 := callNamed(s, "resolve", map[string]any{"seq": float64(seq2), "by": "A"})
+	if respStruct(t, r2)["state"] != "done" {
+		t.Fatal("resolve default state should be 'done' in structuredContent")
+	}
+	if outputSchemaOf(t, "resolve") == nil {
+		t.Fatal("resolve tool must advertise an outputSchema")
+	}
+}
+
+func TestRecallStructuredContent(t *testing.T) {
+	s := newMemServer(t)
+	respText(t, callNamed(s, "remember", map[string]any{"text": "prefer tabs over spaces", "tags": []any{"style", "fmt"}}))
+	respText(t, callNamed(s, "remember", map[string]any{"text": "deploy on fridays"}))
+
+	r := callNamed(s, "recall", map[string]any{"query": "indentation style", "k": float64(2)})
+
+	// text MUST stay byte-identical to v1 (formatRecall of the same hits).
+	hits, err := s.mem.Recall(s.tenant, "indentation style", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantText := formatRecall("indentation style", hits)
+	if got := respText(t, r); got != wantText {
+		t.Fatalf("recall text changed:\n got: %q\nwant: %q", got, wantText)
+	}
+
+	sc := respStruct(t, r)
+	if sc["query"] != "indentation style" {
+		t.Fatalf("recall structured query = %v, want %q", sc["query"], "indentation style")
+	}
+	if sc["count"].(int) != len(hits) {
+		t.Fatalf("recall structured count = %v, want %d", sc["count"], len(hits))
+	}
+	mems, ok := sc["memories"].([]map[string]any)
+	if !ok || len(mems) != len(hits) {
+		t.Fatalf("recall structured memories bad: %#v", sc["memories"])
+	}
+	// The nearest hit ("prefer tabs over spaces") comes first and carries its tags,
+	// id, distance and text — the same data the text lines show.
+	first := mems[0]
+	if first["text"] != "prefer tabs over spaces" {
+		t.Fatalf("recall memories[0].text = %v, want the nearest memory", first["text"])
+	}
+	if _, ok := first["id"].(uint64); !ok {
+		t.Fatalf("recall memories[0].id not uint64: %#v", first["id"])
+	}
+	if _, ok := first["distance"].(float64); !ok {
+		t.Fatalf("recall memories[0].distance not float64: %#v", first["distance"])
+	}
+	tags, ok := first["tags"].([]string)
+	if !ok || len(tags) != 2 || tags[0] != "style" {
+		t.Fatalf("recall memories[0].tags = %#v, want [style fmt]", first["tags"])
+	}
+	// A tag-less memory omits the tags key entirely (mirrors the text, which shows none).
+	if _, present := mems[1]["tags"]; present {
+		t.Fatalf("tag-less memory should omit tags key, got %#v", mems[1])
+	}
+	if outputSchemaOf(t, "recall") == nil {
+		t.Fatal("recall tool must advertise an outputSchema")
+	}
+}
+
+func TestReadStructuredContentWithPresenceAndTask(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.SetLeaseTTL(15 * time.Minute)
+	// A heartbeat populates a presence slot (no channel message).
+	respText(t, callNamed(s, "heartbeat", map[string]any{"from": "worker-2", "status": "building", "area": "proj/x"}))
+	// A claimed task should surface its live state in the structured message.
+	post := callNamed(s, "post", map[string]any{"area": "proj/x", "from": "lead", "text": "migrate schema", "kind": "task"})
+	seq := extractSeq(t, post)
+	respText(t, callNamed(s, "claim", map[string]any{"seq": float64(seq), "by": "worker-2"}))
+
+	r := callNamed(s, "read", map[string]any{"area": "proj/x", "since": 0})
+
+	// text still renders presence + the ⟨claimed by …⟩ suffix (behavior unchanged).
+	txt := respText(t, r)
+	if !strings.Contains(txt, "~ worker-2") || !strings.Contains(txt, "⟨claimed by worker-2") {
+		t.Fatalf("read text lost presence/task rendering:\n%s", txt)
+	}
+
+	sc := respStruct(t, r)
+	if sc["area"] != "proj/x" {
+		t.Fatalf("read structured area = %v, want proj/x", sc["area"])
+	}
+	if sc["cursor"].(uint64) != seq {
+		t.Fatalf("read structured cursor = %v, want %d", sc["cursor"], seq)
+	}
+
+	// presence[] carries the heartbeat slot.
+	pres, ok := sc["presence"].([]map[string]any)
+	if !ok || len(pres) != 1 {
+		t.Fatalf("read structured presence bad: %#v", sc["presence"])
+	}
+	if pres[0]["agent"] != "worker-2" || pres[0]["status"] != "building" || pres[0]["area"] != "proj/x" {
+		t.Fatalf("presence slot wrong: %#v", pres[0])
+	}
+	if _, ok := pres[0]["ageSec"].(int64); !ok {
+		t.Fatalf("presence ageSec not int64: %#v", pres[0]["ageSec"])
+	}
+
+	// messages[] carries seq/from/kind/text and the claimed task state.
+	msgs, ok := sc["messages"].([]map[string]any)
+	if !ok || len(msgs) != 1 {
+		t.Fatalf("read structured messages bad: %#v", sc["messages"])
+	}
+	m0 := msgs[0]
+	if m0["seq"].(uint64) != seq {
+		t.Fatalf("message seq = %v, want %d", m0["seq"], seq)
+	}
+	if m0["from"] != "lead" || m0["kind"] != "task" || m0["text"] != "migrate schema" {
+		t.Fatalf("message core fields wrong: %#v", m0)
+	}
+	task, ok := m0["task"].(map[string]any)
+	if !ok {
+		t.Fatalf("claimed message missing task state: %#v", m0)
+	}
+	if task["state"] != "claimed" {
+		t.Fatalf("task state = %v, want claimed", task["state"])
+	}
+	if task["holder"] != "worker-2" {
+		t.Fatalf("task holder = %v, want worker-2", task["holder"])
+	}
+	if lu, ok := task["leaseUntil"].(int64); !ok || lu <= 0 {
+		t.Fatalf("task leaseUntil should be a positive int64, got %#v", task["leaseUntil"])
+	}
+	if outputSchemaOf(t, "read") == nil {
+		t.Fatal("read tool must advertise an outputSchema")
+	}
+}
+
+func TestInboxStructuredContent(t *testing.T) {
+	s := newMemServer(t)
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch1", From: "alice", Text: "ping", Target: "08", Kind: "question"})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch2", From: "bob", Text: "fyi", Target: "08", Kind: "info"})
+	s.chat.Post(s.tenant, comms.MessagePayload{Area: "ch1", From: "alice", Text: "not for 08", Target: "09"})
+
+	r := callNamed(s, "inbox", map[string]any{"target": "08"})
+
+	// text unchanged: both directed messages present, the 09-directed one absent.
+	txt := respText(t, r)
+	if !strings.Contains(txt, "ping") || !strings.Contains(txt, "fyi") || strings.Contains(txt, "not for 08") {
+		t.Fatalf("inbox text wrong:\n%s", txt)
+	}
+
+	sc := respStruct(t, r)
+	if sc["target"] != "08" {
+		t.Fatalf("inbox structured target = %v, want 08", sc["target"])
+	}
+	if sc["count"].(int) != 2 {
+		t.Fatalf("inbox structured count = %v, want 2", sc["count"])
+	}
+	if _, ok := sc["cursor"].(uint64); !ok {
+		t.Fatalf("inbox structured cursor not uint64: %#v", sc["cursor"])
+	}
+	msgs, ok := sc["messages"].([]map[string]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("inbox structured messages bad: %#v", sc["messages"])
+	}
+	// The cross-area message from ch2 carries seq/area/from/target/kind/text.
+	var found bool
+	for _, m := range msgs {
+		if m["text"] == "fyi" {
+			found = true
+			if m["area"] != "ch2" {
+				t.Fatalf("fyi message area = %v, want ch2", m["area"])
+			}
+			if m["from"] != "bob" || m["target"] != "08" || m["kind"] != "info" {
+				t.Fatalf("fyi message fields wrong: %#v", m)
+			}
+			if _, ok := m["seq"].(uint64); !ok {
+				t.Fatalf("fyi message seq not uint64: %#v", m["seq"])
+			}
+		}
+		if m["text"] == "not for 08" {
+			t.Fatalf("inbox structured leaked a message directed at 09: %#v", m)
+		}
+	}
+	if !found {
+		t.Fatalf("inbox structured missing the fyi message: %#v", msgs)
+	}
+	if outputSchemaOf(t, "inbox") == nil {
+		t.Fatal("inbox tool must advertise an outputSchema")
 	}
 }
