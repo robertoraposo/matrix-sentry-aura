@@ -196,6 +196,13 @@ func (c *CodexAppServer) readLoop(r io.Reader) {
 			continue
 		}
 
+		if len(message.ID) > 0 &&
+			string(message.ID) != "null" &&
+			message.Method != "" {
+			c.rejectServerRequest(message)
+			continue
+		}
+
 		if len(message.ID) > 0 && string(message.ID) != "null" {
 			var id int64
 			if err := json.Unmarshal(message.ID, &id); err != nil {
@@ -436,16 +443,19 @@ type CodexSessionManagerConfig struct {
 	Root           string
 	Executable     string
 	RequestTimeout time.Duration
+	InvokeTimeout  time.Duration
 	CommandFactory CodexCommandFactory
 }
 
 type managedCodexSession struct {
-	opMu sync.Mutex
-	mu   sync.Mutex
+	opMu     sync.Mutex
+	invokeMu sync.Mutex
+	mu       sync.Mutex
 
-	client    *CodexAppServer
-	pending   *CodexDeviceCodeLogin
-	completed map[string]struct{}
+	client     *CodexAppServer
+	pending    *CodexDeviceCodeLogin
+	completed  map[string]struct{}
+	invocation *codexInvocation
 }
 
 type CodexSessionManager struct {
@@ -481,6 +491,9 @@ func NewCodexSessionManager(
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = 20 * time.Second
 	}
+	if cfg.InvokeTimeout <= 0 {
+		cfg.InvokeTimeout = 3 * time.Minute
+	}
 
 	return &CodexSessionManager{
 		sessions: make(map[sentry.TenantID]*managedCodexSession),
@@ -512,6 +525,9 @@ func (m *CodexSessionManager) session(
 		fmt.Sprintf("tenant-%d", tenant),
 		"codex",
 	)
+	if err := ensureCodexBrokerProfile(home); err != nil {
+		return nil, err
+	}
 	created := &managedCodexSession{}
 
 	client, err := StartCodexAppServer(ctx, CodexAppServerConfig{
@@ -546,6 +562,8 @@ func (s *managedCodexSession) handleNotification(
 	method string,
 	params json.RawMessage,
 ) {
+	s.handleInvocationNotification(method, params)
+
 	if method != "account/login/completed" {
 		return
 	}
