@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"matrixsentry/providerbroker"
@@ -60,7 +62,11 @@ func newProviderTestServer(t *testing.T) *server {
 }
 
 func TestProviderToolsAdvertiseOutputSchemas(t *testing.T) {
-	for _, name := range []string{"provider_list", "provider_status"} {
+	for _, name := range []string{
+		"provider_list",
+		"provider_status",
+		"provider_invoke",
+	} {
 		if outputSchemaOf(t, name) == nil {
 			t.Fatalf("%s must advertise an outputSchema", name)
 		}
@@ -158,5 +164,106 @@ func TestProviderStatusRejectsUnknownProvider(t *testing.T) {
 
 	if result["isError"] != true {
 		t.Fatalf("unknown provider did not return tool error: %#v", result)
+	}
+}
+
+func TestProviderInvokeOllamaReturnsStructuredResult(t *testing.T) {
+	s := newProviderTestServer(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", r.Method)
+			}
+			if r.URL.Path != "/api/chat" {
+				t.Fatalf("path = %s, want /api/chat", r.URL.Path)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"model": "qwen3:8b",
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": "Hola desde Matrix.",
+				},
+				"done":                 true,
+				"done_reason":          "stop",
+				"total_duration":       9000,
+				"load_duration":        1000,
+				"prompt_eval_count":    8,
+				"prompt_eval_duration": 2000,
+				"eval_count":           4,
+				"eval_duration":        3000,
+			})
+		},
+	))
+	defer upstream.Close()
+
+	s.ollamaClient = upstream.Client()
+	s.ollamaURL = upstream.URL
+
+	if err := s.providers.SetDefaultStatus(
+		"ollama",
+		providerbroker.Status{
+			State:   providerbroker.StateConnected,
+			Account: "local",
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := callProviderTool(
+		t,
+		s,
+		sentry.TenantID(1),
+		"provider_invoke",
+		map[string]any{
+			"provider": "ollama",
+			"model":    "qwen3:8b",
+			"system":   "Responde brevemente.",
+			"prompt":   "Di hola.",
+		},
+	)
+
+	sc := respStruct(t, resp)
+
+	if sc["provider"] != "ollama" {
+		t.Fatalf("provider = %#v", sc["provider"])
+	}
+	if sc["model"] != "qwen3:8b" {
+		t.Fatalf("model = %#v", sc["model"])
+	}
+	if sc["content"] != "Hola desde Matrix." {
+		t.Fatalf("content = %#v", sc["content"])
+	}
+	if sc["done"] != true || sc["doneReason"] != "stop" {
+		t.Fatalf("completion state = %#v", sc)
+	}
+	if sc["promptTokens"] != 8 || sc["completionTokens"] != 4 {
+		t.Fatalf("token metrics = %#v", sc)
+	}
+}
+
+func TestProviderInvokeRejectsDisconnectedProvider(t *testing.T) {
+	s := newProviderTestServer(t)
+
+	resp := callProviderTool(
+		t,
+		s,
+		sentry.TenantID(1),
+		"provider_invoke",
+		map[string]any{
+			"provider": "ollama",
+			"model":    "qwen3:8b",
+			"prompt":   "Di hola.",
+		},
+	)
+
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result not a map: %#v", resp.Result)
+	}
+	if result["isError"] != true {
+		t.Fatalf("disconnected provider was invoked: %#v", result)
 	}
 }
