@@ -15,6 +15,7 @@ import (
 type fakeCodexSessions struct {
 	status providerbroker.CodexSessionStatus
 	login  providerbroker.CodexDeviceCodeLogin
+	invoke providerbroker.CodexInvokeResult
 }
 
 func (f *fakeCodexSessions) Status(
@@ -44,6 +45,14 @@ func (f *fakeCodexSessions) Logout(
 	sentry.TenantID,
 ) error {
 	return nil
+}
+
+func (f *fakeCodexSessions) Invoke(
+	context.Context,
+	sentry.TenantID,
+	providerbroker.CodexInvokeRequest,
+) (providerbroker.CodexInvokeResult, error) {
+	return f.invoke, nil
 }
 
 func TestProviderAPIStatusAndDeviceLogin(t *testing.T) {
@@ -133,5 +142,48 @@ func TestProviderAPIRejectsUnauthorizedAndInvalidTenant(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid tenant code = %d", recorder.Code)
+	}
+}
+
+func TestProviderAPIInvokesCodex(t *testing.T) {
+	fake := &fakeCodexSessions{
+		invoke: providerbroker.CodexInvokeResult{
+			Provider:      "codex",
+			Model:         "default",
+			Content:       "CODEX_HTTP_OK",
+			Done:          true,
+			DoneReason:    "stop",
+			TotalDuration: 10,
+		},
+	}
+	server := &apiServer{sessions: fake, token: "internal-token"}
+	handler := server.routes()
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/tenants/1/providers/codex/invoke",
+		bytes.NewBufferString(
+			`{"model":"default","system":"brief","prompt":"hello"}`,
+		),
+	)
+	request.Header.Set("Authorization", "Bearer internal-token")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf(
+			"invoke code = %d, body=%s",
+			recorder.Code,
+			recorder.Body.String(),
+		)
+	}
+
+	var result providerbroker.CodexInvokeResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "CODEX_HTTP_OK" || !result.Done {
+		t.Fatalf("invoke result = %+v", result)
 	}
 }

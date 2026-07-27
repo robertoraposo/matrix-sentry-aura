@@ -378,3 +378,71 @@ func TestProviderConnectRejectsUnsupportedProvider(t *testing.T) {
 		t.Fatalf("unsupported provider response = %#v", resp.Result)
 	}
 }
+
+func TestProviderInvokeCodexUsesSessionDaemon(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+
+			switch {
+			case r.Method == http.MethodGet &&
+				r.URL.Path == "/v1/tenants/9/providers/codex":
+				json.NewEncoder(w).Encode(map[string]any{
+					"provider":           "codex",
+					"state":              "connected",
+					"account":            "owner@example.com",
+					"requiresOpenaiAuth": true,
+				})
+
+			case r.Method == http.MethodPost &&
+				r.URL.Path == "/v1/tenants/9/providers/codex/invoke":
+				var request providerbroker.CodexInvokeRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				if request.Model != "default" ||
+					request.System != "Responde brevemente." ||
+					request.Prompt != "Di la marca." {
+					t.Fatalf("unexpected Codex request: %+v", request)
+				}
+				json.NewEncoder(w).Encode(map[string]any{
+					"provider":         "codex",
+					"model":            "default",
+					"content":          "CODEX_MATRIX_OK",
+					"done":             true,
+					"doneReason":       "stop",
+					"totalDuration":    123,
+					"loadDuration":     0,
+					"promptTokens":     0,
+					"completionTokens": 0,
+				})
+
+			default:
+				http.NotFound(w, r)
+			}
+		},
+	))
+	defer upstream.Close()
+
+	s := newProviderTestServer(t)
+	s.providerDaemon = newProviderDaemonClient(upstream.URL, "")
+
+	result := respStruct(t, callProviderTool(
+		t,
+		s,
+		sentry.TenantID(9),
+		"provider_invoke",
+		map[string]any{
+			"provider": "codex",
+			"model":    "default",
+			"system":   "Responde brevemente.",
+			"prompt":   "Di la marca.",
+		},
+	))
+
+	if result["provider"] != "codex" ||
+		result["content"] != "CODEX_MATRIX_OK" ||
+		result["done"] != true {
+		t.Fatalf("unexpected Codex MCP result: %#v", result)
+	}
+}

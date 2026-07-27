@@ -26,6 +26,11 @@ type codexSessions interface {
 	StartLogin(context.Context, sentry.TenantID) (providerbroker.CodexDeviceCodeLogin, error)
 	CancelLogin(context.Context, sentry.TenantID, string) error
 	Logout(context.Context, sentry.TenantID) error
+	Invoke(
+		context.Context,
+		sentry.TenantID,
+		providerbroker.CodexInvokeRequest,
+	) (providerbroker.CodexInvokeResult, error)
 }
 
 type apiServer struct {
@@ -54,6 +59,11 @@ func main() {
 		envDuration("SENTRY_CODEX_TIMEOUT", 20*time.Second),
 		"Codex app-server request timeout",
 	)
+	invokeTimeout := flag.Duration(
+		"invoke-timeout",
+		envDuration("SENTRY_CODEX_INVOKE_TIMEOUT", 3*time.Minute),
+		"maximum duration for one brokered Codex turn",
+	)
 	flag.Parse()
 
 	manager, err := providerbroker.NewCodexSessionManager(
@@ -61,6 +71,7 @@ func main() {
 			Root:           *root,
 			Executable:     *codexBin,
 			RequestTimeout: *requestTimeout,
+			InvokeTimeout:  *invokeTimeout,
 		},
 	)
 	if err != nil {
@@ -78,7 +89,7 @@ func main() {
 		Handler:           api.routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      *invokeTimeout + 30*time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -123,6 +134,10 @@ func (a *apiServer) routes() http.Handler {
 	mux.Handle(
 		"POST /v1/tenants/{tenant}/providers/codex/logout",
 		protected(a.handleLogout),
+	)
+	mux.Handle(
+		"POST /v1/tenants/{tenant}/providers/codex/invoke",
+		protected(a.handleInvoke),
 	)
 	return mux
 }
@@ -220,6 +235,36 @@ func (a *apiServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 		"provider": "codex",
 		"state":    providerbroker.StateDisconnected,
 	})
+}
+
+func (a *apiServer) handleInvoke(w http.ResponseWriter, r *http.Request) {
+	tenant, ok := tenantFromRequest(w, r)
+	if !ok {
+		return
+	}
+
+	var input providerbroker.CodexInvokeRequest
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	result, err := a.sessions.Invoke(r.Context(), tenant, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, providerbroker.ErrCodexNotConnected):
+			writeError(w, http.StatusConflict, "Codex is not connected")
+		case errors.Is(err, providerbroker.ErrCodexInputTooLarge):
+			writeError(w, http.StatusRequestEntityTooLarge, "Codex invocation input is too large")
+		case errors.Is(err, context.DeadlineExceeded):
+			writeError(w, http.StatusGatewayTimeout, "Codex invocation timed out")
+		default:
+			writeError(w, http.StatusBadGateway, "Codex invocation failed")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func tenantFromRequest(
