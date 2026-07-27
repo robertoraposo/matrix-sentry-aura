@@ -131,6 +131,50 @@ func providerToolDefinitions() []map[string]any {
 				},
 			},
 		},
+
+		{
+			"name":        "provider_invoke",
+			"description": "Invoke a connected AI provider through Matrix without exposing credentials or internal endpoints.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"provider": map[string]any{"type": "string"},
+					"model":    map[string]any{"type": "string"},
+					"system":   map[string]any{"type": "string"},
+					"prompt":   map[string]any{"type": "string"},
+				},
+				"required": []any{
+					"provider",
+					"model",
+					"prompt",
+				},
+			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"provider":         map[string]any{"type": "string"},
+					"model":            map[string]any{"type": "string"},
+					"content":          map[string]any{"type": "string"},
+					"done":             map[string]any{"type": "boolean"},
+					"doneReason":       map[string]any{"type": "string"},
+					"totalDuration":    map[string]any{"type": "integer"},
+					"loadDuration":     map[string]any{"type": "integer"},
+					"promptTokens":     map[string]any{"type": "integer"},
+					"completionTokens": map[string]any{"type": "integer"},
+				},
+				"required": []any{
+					"provider",
+					"model",
+					"content",
+					"done",
+					"doneReason",
+					"totalDuration",
+					"loadDuration",
+					"promptTokens",
+					"completionTokens",
+				},
+			},
+		},
 	}
 }
 
@@ -212,6 +256,8 @@ func (s *server) handleProviderTool(
 		}
 
 		return s.toolStruct(id, text, structured)
+	case "provider_invoke":
+		return s.handleProviderInvoke(id, tenant, args)
 	}
 
 	return s.toolErr(id, "unknown provider tool")
