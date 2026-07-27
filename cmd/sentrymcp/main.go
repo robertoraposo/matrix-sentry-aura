@@ -79,21 +79,22 @@ type rpcErr struct {
 }
 
 type server struct {
-	mu           sync.Mutex // serializes Append-bearing tool calls deterministically
-	store        *sentry.Store
-	reg          *sentry.Registry // path→id dictionary for real (file-path) accesses
-	mem          *memory.Store    // semantic memory (nil when no embedder is configured)
-	chat         *comms.Store     // agent communication channel
-	blobs        *blob.Store      // content-addressed image bytes (comms image transfer)
-	oauth        *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
-	moko         *mokoblinks.Client
-	providers    *providerbroker.Registry
-	ollamaClient *http.Client
-	ollamaURL    string
-	tenant       sentry.TenantID
-	token        string         // optional bearer auth for HTTP transport
-	tokens       *tokenRegistry // secret→tenant; owner built-in, teams from SENTRY_TOKENS_FILE
-	logRecall    bool           // journal recall queries as EventRecall (SENTRY_RECALL_LOG)
+	mu             sync.Mutex // serializes Append-bearing tool calls deterministically
+	store          *sentry.Store
+	reg            *sentry.Registry // path→id dictionary for real (file-path) accesses
+	mem            *memory.Store    // semantic memory (nil when no embedder is configured)
+	chat           *comms.Store     // agent communication channel
+	blobs          *blob.Store      // content-addressed image bytes (comms image transfer)
+	oauth          *oauthProvider   // native OAuth AS for claude.ai (nil when not configured)
+	moko           *mokoblinks.Client
+	providers      *providerbroker.Registry
+	providerDaemon *providerDaemonClient
+	ollamaClient   *http.Client
+	ollamaURL      string
+	tenant         sentry.TenantID
+	token          string         // optional bearer auth for HTTP transport
+	tokens         *tokenRegistry // secret→tenant; owner built-in, teams from SENTRY_TOKENS_FILE
+	logRecall      bool           // journal recall queries as EventRecall (SENTRY_RECALL_LOG)
 
 	recallMu   sync.Mutex    // guards recallRing
 	recallRing []recallEntry // bounded ring of recent recalls for analyze_recall — O(≤cap), no journal scan
@@ -127,10 +128,14 @@ func main() {
 
 	moko := mokoblinks.FromEnv()
 	s := &server{
-		store:        store,
-		reg:          reg,
-		moko:         moko,
-		providers:    defaultProviderRegistry(),
+		store:     store,
+		reg:       reg,
+		moko:      moko,
+		providers: defaultProviderRegistry(),
+		providerDaemon: newProviderDaemonClient(
+			envOr("SENTRY_PROVIDERD_URL", ""),
+			os.Getenv("SENTRY_PROVIDERD_TOKEN"),
+		),
 		ollamaClient: &http.Client{Timeout: 2 * time.Minute},
 		ollamaURL:    *ollamaURL,
 		tenant:       sentry.TenantID(*tenant),
@@ -1075,7 +1080,12 @@ func (s *server) callTool(req rpcReq, tenant sentry.TenantID) rpcResp {
 		return s.fail(req.ID, -32602, "invalid params")
 	}
 	switch p.Name {
-	case "provider_list", "provider_status", "provider_invoke":
+	case "provider_list",
+		"provider_status",
+		"provider_connect",
+		"provider_connect_cancel",
+		"provider_disconnect",
+		"provider_invoke":
 		return s.handleProviderTool(req.ID, tenant, p.Name, p.Args)
 	case "record_access":
 		src, _ := strArg(p.Args, "src")

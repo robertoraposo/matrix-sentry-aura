@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -72,6 +73,22 @@ func providerToolDefinitions() []map[string]any {
 			"type":        "string",
 			"description": "connected account label; empty when disconnected",
 		},
+		"accountType": map[string]any{
+			"type":        "string",
+			"description": "provider account type when available",
+		},
+		"planType": map[string]any{
+			"type":        "string",
+			"description": "provider plan label when available",
+		},
+		"requiresOpenaiAuth": map[string]any{
+			"type":        "boolean",
+			"description": "whether the official Codex client requires OpenAI authentication",
+		},
+		"loginId": map[string]any{
+			"type":        "string",
+			"description": "opaque pending login identifier; never a provider credential",
+		},
 	}
 
 	return []map[string]any{
@@ -132,6 +149,61 @@ func providerToolDefinitions() []map[string]any {
 			},
 		},
 
+		{
+			"name":        "provider_connect",
+			"description": "Start an official provider login through Matrix. For Codex this returns the official device-code URL and short-lived user code; no credentials are exposed.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"provider": map[string]any{"type": "string"},
+				},
+				"required": []any{"provider"},
+			},
+			"outputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"provider":        map[string]any{"type": "string"},
+					"state":           map[string]any{"type": "string"},
+					"type":            map[string]any{"type": "string"},
+					"loginId":         map[string]any{"type": "string"},
+					"verificationUrl": map[string]any{"type": "string"},
+					"userCode":        map[string]any{"type": "string"},
+				},
+				"required": []any{
+					"provider",
+					"state",
+					"type",
+					"loginId",
+					"verificationUrl",
+					"userCode",
+				},
+			},
+		},
+		{
+			"name":        "provider_connect_cancel",
+			"description": "Cancel a pending official provider login for the authenticated tenant.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"provider": map[string]any{"type": "string"},
+					"loginId":  map[string]any{"type": "string"},
+				},
+				"required": []any{"provider", "loginId"},
+			},
+			"outputSchema": providerActionOutputSchema(),
+		},
+		{
+			"name":        "provider_disconnect",
+			"description": "Disconnect the authenticated tenant's official provider session without returning credential material.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"provider": map[string]any{"type": "string"},
+				},
+				"required": []any{"provider"},
+			},
+			"outputSchema": providerActionOutputSchema(),
+		},
 		{
 			"name":        "provider_invoke",
 			"description": "Invoke a connected AI provider through Matrix without exposing credentials or internal endpoints.",
@@ -204,17 +276,17 @@ func (s *server) handleProviderTool(
 		)
 
 		for _, provider := range providers {
-			status, _ := s.providers.Status(tenant, provider.ID)
-			item := providerResult(provider, status)
+			item := s.providerResultForTenant(tenant, provider)
 			structured = append(structured, item)
 
+			state, _ := item["state"].(string)
 			lines = append(
 				lines,
 				fmt.Sprintf(
 					"- %s (%s): %s",
 					provider.Name,
 					provider.ID,
-					status.State,
+					state,
 				),
 			)
 		}
@@ -242,25 +314,191 @@ func (s *server) handleProviderTool(
 			)
 		}
 
-		status, _ := s.providers.Status(tenant, provider.ID)
-		structured := providerResult(provider, status)
+		structured := s.providerResultForTenant(tenant, provider)
+		state, _ := structured["state"].(string)
+		account, _ := structured["account"].(string)
 
 		text := fmt.Sprintf(
 			"provider %s (%s): state=%s",
 			provider.Name,
 			provider.ID,
-			status.State,
+			state,
 		)
-		if status.Account != "" {
-			text += " account=" + status.Account
+		if account != "" {
+			text += " account=" + account
 		}
 
 		return s.toolStruct(id, text, structured)
+
+	case "provider_connect":
+		providerResponse, ok := s.managedCodexProvider(id, args)
+		if !ok {
+			return providerResponse
+		}
+		login, err := s.providerDaemon.startLogin(context.Background(), tenant)
+		if err != nil {
+			return s.toolErr(id, "unable to start official Codex login: "+err.Error())
+		}
+		_ = s.providers.SetStatus(
+			tenant,
+			"codex",
+			providerbroker.Status{State: login.State},
+		)
+		return s.toolStruct(
+			id,
+			"official Codex device login started",
+			map[string]any{
+				"provider":        login.Provider,
+				"state":           string(login.State),
+				"type":            login.Type,
+				"loginId":         login.LoginID,
+				"verificationUrl": login.VerificationURL,
+				"userCode":        login.UserCode,
+			},
+		)
+
+	case "provider_connect_cancel":
+		providerResponse, ok := s.managedCodexProvider(id, args)
+		if !ok {
+			return providerResponse
+		}
+		loginID, ok := strArg(args, "loginId")
+		if !ok || strings.TrimSpace(loginID) == "" {
+			return s.toolErr(id, "loginId is required")
+		}
+		if err := s.providerDaemon.cancelLogin(
+			context.Background(),
+			tenant,
+			loginID,
+		); err != nil {
+			return s.toolErr(id, "unable to cancel Codex login: "+err.Error())
+		}
+		_ = s.providers.SetStatus(
+			tenant,
+			"codex",
+			providerbroker.Status{State: providerbroker.StateDisconnected},
+		)
+		return s.toolStruct(
+			id,
+			"Codex login cancelled",
+			providerActionResult("codex", providerbroker.StateDisconnected),
+		)
+
+	case "provider_disconnect":
+		providerResponse, ok := s.managedCodexProvider(id, args)
+		if !ok {
+			return providerResponse
+		}
+		if err := s.providerDaemon.logout(context.Background(), tenant); err != nil {
+			return s.toolErr(id, "unable to disconnect Codex: "+err.Error())
+		}
+		_ = s.providers.SetStatus(
+			tenant,
+			"codex",
+			providerbroker.Status{State: providerbroker.StateDisconnected},
+		)
+		return s.toolStruct(
+			id,
+			"Codex disconnected",
+			providerActionResult("codex", providerbroker.StateDisconnected),
+		)
+
 	case "provider_invoke":
 		return s.handleProviderInvoke(id, tenant, args)
 	}
 
 	return s.toolErr(id, "unknown provider tool")
+}
+
+func providerActionOutputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"provider": map[string]any{"type": "string"},
+			"state":    map[string]any{"type": "string"},
+		},
+		"required": []any{"provider", "state"},
+	}
+}
+
+func providerActionResult(
+	provider string,
+	state providerbroker.State,
+) map[string]any {
+	return map[string]any{
+		"provider": provider,
+		"state":    string(state),
+	}
+}
+
+func (s *server) managedCodexProvider(
+	id json.RawMessage,
+	args map[string]any,
+) (rpcResp, bool) {
+	providerID, ok := strArg(args, "provider")
+	if !ok || strings.TrimSpace(providerID) == "" {
+		return s.toolErr(id, "provider is required"), false
+	}
+	provider, found := findProvider(s.providers, providerID)
+	if !found {
+		return s.toolErr(
+			id,
+			fmt.Sprintf("unknown provider %q", providerID),
+		), false
+	}
+	if provider.ID != "codex" {
+		return s.toolErr(
+			id,
+			fmt.Sprintf(
+				"connection management is not available for provider %q",
+				provider.ID,
+			),
+		), false
+	}
+	if s.providerDaemon == nil {
+		return s.toolErr(
+			id,
+			"provider session daemon is not configured",
+		), false
+	}
+	return rpcResp{}, true
+}
+
+func (s *server) providerResultForTenant(
+	tenant sentry.TenantID,
+	provider providerbroker.Provider,
+) map[string]any {
+	status, _ := s.providers.Status(tenant, provider.ID)
+	result := providerResult(provider, status)
+
+	if provider.ID != "codex" || s.providerDaemon == nil {
+		return result
+	}
+
+	remote, err := s.providerDaemon.status(context.Background(), tenant)
+	if err != nil {
+		result["state"] = string(providerbroker.StateError)
+		result["account"] = ""
+		result["requiresOpenaiAuth"] = true
+		return result
+	}
+
+	_ = s.providers.SetStatus(
+		tenant,
+		provider.ID,
+		providerbroker.Status{
+			State:   remote.State,
+			Account: remote.Account,
+		},
+	)
+
+	result["state"] = string(remote.State)
+	result["account"] = remote.Account
+	result["accountType"] = remote.AccountType
+	result["planType"] = remote.PlanType
+	result["requiresOpenaiAuth"] = remote.RequiresOpenAIAuth
+	result["loginId"] = remote.LoginID
+	return result
 }
 
 func findProvider(

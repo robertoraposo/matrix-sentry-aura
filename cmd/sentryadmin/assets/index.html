@@ -397,6 +397,10 @@
       </div>
     </div>
 
+    <sc-if value="{{ providerError }}" hint-placeholder-val="{{ false }}">
+      <div style="margin:14px 20px 0;padding:10px 12px;border-radius:10px;background:rgba(255,107,139,.08);border:1px solid rgba(255,107,139,.22);font:600 10px 'JetBrains Mono';color:#ff9bae">{{ providerError }}</div>
+    </sc-if>
+
     <div style="flex:1;overflow-y:auto;padding:20px">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
         <sc-for list="{{ providerCards }}" as="p" hint-placeholder-count="3">
@@ -430,8 +434,26 @@
               </div>
             </div>
 
-            <div style="margin-top:17px;padding-top:12px;border-top:1px solid rgba(120,180,255,.07);font:500 9.5px/1.45 'JetBrains Mono';color:#536079">
-              Conexión y desconexión estarán disponibles al incorporar sentryproviderd.
+            <div style="margin-top:17px;padding-top:13px;border-top:1px solid rgba(120,180,255,.07)">
+              <sc-if value="{{ p.showLogin }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:12px;border-radius:11px;background:rgba(53,230,255,.06);border:1px solid rgba(53,230,255,.18);margin-bottom:10px">
+                  <div style="font:600 9.5px 'Space Grotesk';letter-spacing:.1em;text-transform:uppercase;color:#72dff7">Código oficial de OpenAI</div>
+                  <div style="font:700 23px 'JetBrains Mono';letter-spacing:.13em;color:#eef9ff;margin-top:8px">{{ p.userCode }}</div>
+                  <div style="font:500 9px/1.4 'JetBrains Mono';color:#66728d;margin-top:7px;overflow-wrap:anywhere">{{ p.verificationUrl }}</div>
+                  <button onClick="{{ p.onOpenLogin }}" style="margin-top:10px;width:100%;padding:8px;border-radius:9px;border:1px solid rgba(53,230,255,.28);background:rgba(53,230,255,.11);color:#a9f2ff;font:600 10.5px 'Space Grotesk';cursor:pointer">Abrir sitio oficial ↗</button>
+                </div>
+              </sc-if>
+
+              <div style="display:flex;gap:8px">
+                <sc-if value="{{ p.showPrimary }}" hint-placeholder-val="{{ true }}">
+                  <button onClick="{{ p.onPrimary }}" style="{{ p.primaryStyle }}">{{ p.primaryLabel }}</button>
+                </sc-if>
+                <sc-if value="{{ p.showCancel }}" hint-placeholder-val="{{ false }}">
+                  <button onClick="{{ p.onCancel }}" style="flex:1;padding:9px;border-radius:9px;border:1px solid rgba(255,178,62,.28);background:rgba(255,178,62,.09);color:#ffd18a;font:600 10.5px 'Space Grotesk';cursor:pointer">Cancelar login</button>
+                </sc-if>
+              </div>
+
+              <div style="margin-top:9px;font:500 9.5px/1.45 'JetBrains Mono';color:{{ p.noteColor }}">{{ p.note }}</div>
             </div>
           </div>
         </sc-for>
@@ -472,6 +494,9 @@ class Component extends DCLogic {
       teamsOnly: true,
       comms: null,
       providers: { count: 0, providers: [] },
+      providerLogin: null,
+      providerBusy: null,
+      providerError: "",
       copiedId: null,
     };
     this.canvasRef = React.createRef();
@@ -502,6 +527,7 @@ class Component extends DCLogic {
   componentWillUnmount() {
     this._dead = true;
     clearTimeout(this._jt);
+    clearTimeout(this._providerPollT);
     cancelAnimationFrame(this._mraf);
     if (this.galaxy) this.galaxy.dispose();
   }
@@ -650,8 +676,78 @@ class Component extends DCLogic {
 
     window.MatrixLive.fetchProviders().then((providers) => {
       if (this._dead || !providers) return;
-      this.setState({ providers });
+      this.setState({ providers, providerError: "" });
     });
+  }
+
+  async actOnProvider(action, provider) {
+    if (!window.MatrixLive || this.state.providerBusy) return;
+
+    const localLogin =
+      this.state.providerLogin &&
+      this.state.providerLogin.provider === provider.id
+        ? this.state.providerLogin
+        : null;
+    const loginId = provider.loginId || (localLogin && localLogin.loginId) || "";
+
+    this.setState({ providerBusy: provider.id, providerError: "" });
+    try {
+      const result = await window.MatrixLive.providerAction(
+        action,
+        provider.id,
+        loginId,
+      );
+
+      let providerLogin = this.state.providerLogin;
+      if (action === "connect") providerLogin = result;
+      if (action === "cancel" || action === "disconnect") providerLogin = null;
+
+      const providers = await window.MatrixLive.fetchProviders();
+      if (this._dead) return;
+      this.setState({
+        providers: providers || this.state.providers,
+        providerLogin,
+        providerBusy: null,
+        providerError: "",
+      });
+
+      if (action === "connect") this._pollProviders(0);
+    } catch (e) {
+      if (this._dead) return;
+      this.setState({
+        providerBusy: null,
+        providerError: e.message || "No se pudo completar la acción.",
+      });
+    }
+  }
+
+  _pollProviders(attempt) {
+    clearTimeout(this._providerPollT);
+    if (this._dead || !window.MatrixLive) return;
+
+    window.MatrixLive.fetchProviders().then((providers) => {
+      if (this._dead || !providers) return;
+      const codex = (providers.providers || []).find((p) => p.id === "codex");
+      const connected = codex && codex.state === "connected";
+      const connecting = codex && codex.state === "connecting";
+
+      this.setState({
+        providers,
+        providerLogin: connected ? null : this.state.providerLogin,
+      });
+
+      if (connecting && attempt < 150) {
+        this._providerPollT = setTimeout(
+          () => this._pollProviders(attempt + 1),
+          2000,
+        );
+      }
+    });
+  }
+
+  openProviderLogin(url) {
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   // ---- journal ----
@@ -859,13 +955,75 @@ class Component extends DCLogic {
         oauth: "OAuth oficial",
       };
 
+      const managed = p.id === "codex";
+      const login =
+        st.providerLogin && st.providerLogin.provider === p.id
+          ? st.providerLogin
+          : null;
+      const loginId = (login && login.loginId) || p.loginId || "";
+      const busy = st.providerBusy === p.id;
+
+      let primaryLabel = "";
+      let primaryAction = "";
+      if (managed && connected) {
+        primaryLabel = busy ? "Desconectando…" : "Desconectar";
+        primaryAction = "disconnect";
+      } else if (managed && !connecting) {
+        primaryLabel = busy ? "Iniciando…" : "Conectar con ChatGPT";
+        primaryAction = "connect";
+      }
+
+      let note = "La gestión de sesión todavía no está habilitada para este proveedor.";
+      let noteColor = "#536079";
+      if (p.id === "ollama") {
+        note = "Proveedor local: Matrix supervisa su salud y no requiere login.";
+      } else if (managed && connected) {
+        note = "Sesión aislada en Matrix. AURA no recibe credenciales ni tokens.";
+        noteColor = "#72d9ad";
+      } else if (managed && connecting) {
+        note = login
+          ? "Introduce el código en el sitio oficial. Matrix detectará la conexión automáticamente."
+          : "Login en curso. Puedes cancelarlo y comenzar otro para obtener un código nuevo.";
+        noteColor = "#d5ad65";
+      } else if (managed) {
+        note = "Matrix iniciará el flujo oficial de código de dispositivo de OpenAI.";
+        noteColor = "#72cfe3";
+      } else if (p.id === "claude") {
+        note = "La sesión oficial de Claude se incorporará en el siguiente adaptador.";
+      }
+
       return {
         id: p.id,
         name: p.name,
+        loginId,
         capabilities: Array.isArray(p.capabilities) ? p.capabilities : [],
         stateLabel: labels[p.state] || String(p.state || "desconocido").toUpperCase(),
         accountLabel: p.account || "—",
         authLabel: authLabels[p.auth] || p.auth || "—",
+        showLogin: !!(login && login.userCode && login.verificationUrl),
+        userCode: (login && login.userCode) || "",
+        verificationUrl: (login && login.verificationUrl) || "",
+        showPrimary: !!primaryAction,
+        primaryLabel,
+        primaryStyle:
+          "flex:1;padding:9px;border-radius:9px;border:1px solid " +
+          (connected ? "rgba(255,107,139,.28)" : "rgba(53,230,255,.28)") +
+          ";background:" +
+          (connected ? "rgba(255,107,139,.09)" : "rgba(53,230,255,.09)") +
+          ";color:" + (connected ? "#ff9bae" : "#a9f2ff") +
+          ";font:600 10.5px 'Space Grotesk';cursor:pointer",
+        showCancel: managed && connecting && !!loginId,
+        note,
+        noteColor,
+        onPrimary: () => {
+          if (!busy && primaryAction) this.actOnProvider(primaryAction, p);
+        },
+        onCancel: () => {
+          if (!busy) this.actOnProvider("cancel", p);
+        },
+        onOpenLogin: () => this.openProviderLogin(
+          (login && login.verificationUrl) || "",
+        ),
         stateStyle:
           "padding:4px 8px;border-radius:7px;font:700 9px 'JetBrains Mono';" +
           "letter-spacing:.05em;color:" + stateColor +
@@ -916,6 +1074,7 @@ class Component extends DCLogic {
       providerCount: providerCards.length,
       providerConnected: providerSource.filter((p) => p.state === "connected").length,
       refreshProviders: () => this.refreshProviders(),
+      providerError: st.providerError,
     };
   }
 

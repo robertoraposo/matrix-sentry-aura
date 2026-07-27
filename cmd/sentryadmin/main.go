@@ -54,6 +54,7 @@ func main() {
 		mux.Handle("/api/comms", basicAuth(user, pass, http.HandlerFunc(api.handleComms)))
 		mux.Handle("/api/journal", basicAuth(user, pass, http.HandlerFunc(api.handleJournal)))
 		mux.Handle("/api/providers", basicAuth(user, pass, http.HandlerFunc(api.handleProviders)))
+		mux.Handle("/api/providers/action", basicAuth(user, pass, http.HandlerFunc(api.handleProviderAction)))
 		fmt.Fprintf(os.Stderr, "sentryadmin: live data ON (mcp %s)\n", mcpURL)
 	} else {
 		fmt.Fprintln(os.Stderr, "sentryadmin: live data OFF (set SENTRY_ADMIN_MCP_URL) — serving mock")
