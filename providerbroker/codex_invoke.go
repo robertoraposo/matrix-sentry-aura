@@ -464,7 +464,7 @@ func (m *CodexSessionManager) Invoke(
 		"ephemeral":      true,
 		"cwd":            workDir,
 		"approvalPolicy": "never",
-		"sandbox":        "readOnly",
+		"sandbox":        "read-only",
 		"personality":    "none",
 		"serviceName":    "matrix_sentry_broker",
 	}
