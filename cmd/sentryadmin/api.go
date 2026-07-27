@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -371,57 +373,50 @@ func deriveAgents(cr *corpusResp) []string {
 	return agents
 }
 
-// handleProviders calls Matrix's provider_list MCP tool and returns only its
-// structured, credential-free result to the dashboard.
-func (a *apiServer) handleProviders(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
+// callProviderTool invokes a Matrix MCP provider tool and returns only its
+// structured, credential-free response.
+func (a *apiServer) callProviderTool(
+	ctx context.Context,
+	name string,
+	arguments map[string]any,
+) (json.RawMessage, error) {
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "tools/call",
 		"params": map[string]any{
-			"name":      "provider_list",
-			"arguments": map[string]any{},
+			"name":      name,
+			"arguments": arguments,
 		},
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		http.Error(w, `{"error":"request encoding"}`, http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("request encoding: %w", err)
 	}
 
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		http.MethodPost,
 		a.mcpURL+"/mcp",
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		http.Error(w, `{"error":"bad request"}`, http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("create MCP request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-
 	if a.token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.token)
 	}
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		http.Error(w, `{"error":"upstream"}`, http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("MCP unavailable: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		http.Error(w, `{"error":"upstream"}`, http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("MCP status %d", resp.StatusCode)
 	}
 
 	var rpc struct {
@@ -435,20 +430,105 @@ func (a *apiServer) handleProviders(w http.ResponseWriter, r *http.Request) {
 			StructuredContent json.RawMessage `json:"structuredContent"`
 		} `json:"result"`
 	}
-
 	if err := json.NewDecoder(resp.Body).Decode(&rpc); err != nil {
-		http.Error(w, `{"error":"invalid upstream response"}`, http.StatusBadGateway)
+		return nil, fmt.Errorf("invalid MCP response: %w", err)
+	}
+	if rpc.Error != nil {
+		return nil, fmt.Errorf("MCP error: %s", rpc.Error.Message)
+	}
+	if rpc.Result.IsError ||
+		len(rpc.Result.StructuredContent) == 0 ||
+		string(rpc.Result.StructuredContent) == "null" {
+		return nil, fmt.Errorf("provider tool failed")
+	}
+
+	return rpc.Result.StructuredContent, nil
+}
+
+// handleProviders returns the authenticated tenant's provider metadata.
+func (a *apiServer) handleProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
-	if rpc.Error != nil ||
-		rpc.Result.IsError ||
-		len(rpc.Result.StructuredContent) == 0 ||
-		string(rpc.Result.StructuredContent) == "null" {
+	structured, err := a.callProviderTool(
+		r.Context(),
+		"provider_list",
+		map[string]any{},
+	)
+	if err != nil {
 		http.Error(w, `{"error":"provider query failed"}`, http.StatusBadGateway)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(rpc.Result.StructuredContent)
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(structured)
+}
+
+// handleProviderAction maps dashboard actions to tenant-scoped Matrix MCP tools.
+// The dashboard never calls sentryproviderd directly.
+func (a *apiServer) handleProviderAction(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var input struct {
+		Action   string `json:"action"`
+		Provider string `json:"provider"`
+		LoginID  string `json:"loginId"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+
+	input.Action = strings.TrimSpace(input.Action)
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.LoginID = strings.TrimSpace(input.LoginID)
+	if input.Provider == "" {
+		http.Error(w, `{"error":"provider is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	tool := ""
+	args := map[string]any{"provider": input.Provider}
+	switch input.Action {
+	case "connect":
+		tool = "provider_connect"
+	case "cancel":
+		if input.LoginID == "" {
+			http.Error(w, `{"error":"loginId is required"}`, http.StatusBadRequest)
+			return
+		}
+		tool = "provider_connect_cancel"
+		args["loginId"] = input.LoginID
+	case "disconnect":
+		tool = "provider_disconnect"
+	default:
+		http.Error(w, `{"error":"unknown action"}`, http.StatusBadRequest)
+		return
+	}
+
+	structured, err := a.callProviderTool(r.Context(), tool, args)
+	if err != nil {
+		http.Error(w, `{"error":"provider action failed"}`, http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(structured)
 }

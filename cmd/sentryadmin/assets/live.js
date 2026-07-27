@@ -47,6 +47,20 @@
         return null;
       }
     },
+    async providerAction(action, provider, loginId) {
+      const payload = { action, provider };
+      if (loginId) payload.loginId = loginId;
+
+      const r = await fetch("/api/providers/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      let data = {};
+      try { data = await r.json(); } catch (e) {}
+      if (!r.ok) throw new Error(data.error || ("provider action " + r.status));
+      return data;
+    },
     async fetchJournal(tenantKey) {
       try {
         const r = await fetch("/api/journal?tenant=" + encodeURIComponent(tenantKey) + "&limit=60");

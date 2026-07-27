@@ -65,6 +65,9 @@ func TestProviderToolsAdvertiseOutputSchemas(t *testing.T) {
 	for _, name := range []string{
 		"provider_list",
 		"provider_status",
+		"provider_connect",
+		"provider_connect_cancel",
+		"provider_disconnect",
 		"provider_invoke",
 	} {
 		if outputSchemaOf(t, name) == nil {
@@ -265,5 +268,113 @@ func TestProviderInvokeRejectsDisconnectedProvider(t *testing.T) {
 	}
 	if result["isError"] != true {
 		t.Fatalf("disconnected provider was invoked: %#v", result)
+	}
+}
+
+func TestProviderStatusReadsCodexSessionDaemon(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/tenants/7/providers/codex" {
+				t.Fatalf("path = %s", r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer daemon-token" {
+				t.Fatalf("authorization = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"provider":           "codex",
+				"state":              "connected",
+				"account":            "roberto@example.com",
+				"accountType":        "chatgpt",
+				"planType":           "plus",
+				"requiresOpenaiAuth": true,
+			})
+		},
+	))
+	defer upstream.Close()
+
+	s := newProviderTestServer(t)
+	s.providerDaemon = newProviderDaemonClient(
+		upstream.URL,
+		"daemon-token",
+	)
+
+	status := respStruct(t, callProviderTool(
+		t,
+		s,
+		sentry.TenantID(7),
+		"provider_status",
+		map[string]any{"provider": "codex"},
+	))
+
+	if status["state"] != "connected" {
+		t.Fatalf("state = %#v", status["state"])
+	}
+	if status["account"] != "roberto@example.com" {
+		t.Fatalf("account = %#v", status["account"])
+	}
+	if status["planType"] != "plus" {
+		t.Fatalf("planType = %#v", status["planType"])
+	}
+}
+
+func TestProviderConnectReturnsOfficialDeviceCode(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s", r.Method)
+			}
+			if r.URL.Path != "/v1/tenants/3/providers/codex/login" {
+				t.Fatalf("path = %s", r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"provider":        "codex",
+				"state":           "connecting",
+				"type":            "chatgptDeviceCode",
+				"loginId":         "login-123",
+				"verificationUrl": "https://auth.openai.example/device",
+				"userCode":        "ABCD-EFGH",
+			})
+		},
+	))
+	defer upstream.Close()
+
+	s := newProviderTestServer(t)
+	s.providerDaemon = newProviderDaemonClient(upstream.URL, "")
+
+	login := respStruct(t, callProviderTool(
+		t,
+		s,
+		sentry.TenantID(3),
+		"provider_connect",
+		map[string]any{"provider": "codex"},
+	))
+
+	if login["state"] != "connecting" ||
+		login["type"] != "chatgptDeviceCode" ||
+		login["loginId"] != "login-123" ||
+		login["userCode"] != "ABCD-EFGH" {
+		t.Fatalf("unexpected login response: %#v", login)
+	}
+}
+
+func TestProviderConnectRejectsUnsupportedProvider(t *testing.T) {
+	s := newProviderTestServer(t)
+	s.providerDaemon = newProviderDaemonClient(
+		"http://provider.invalid",
+		"",
+	)
+
+	resp := callProviderTool(
+		t,
+		s,
+		sentry.TenantID(1),
+		"provider_connect",
+		map[string]any{"provider": "ollama"},
+	)
+	result, ok := resp.Result.(map[string]any)
+	if !ok || result["isError"] != true {
+		t.Fatalf("unsupported provider response = %#v", resp.Result)
 	}
 }

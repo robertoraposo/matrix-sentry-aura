@@ -341,3 +341,81 @@ func TestAPIProvidersUpstreamErrorIs502(t *testing.T) {
 		t.Fatalf("want 502, got %d", rec.Code)
 	}
 }
+
+func TestAPIProviderActionCallsMCPConnect(t *testing.T) {
+	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mcp" {
+			http.NotFound(w, r)
+			return
+		}
+
+		var req struct {
+			Method string `json:"method"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Method != "tools/call" ||
+			req.Params.Name != "provider_connect" ||
+			req.Params.Arguments["provider"] != "codex" {
+			t.Fatalf("unexpected MCP request: %+v", req)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+		  "jsonrpc":"2.0",
+		  "id":1,
+		  "result":{
+		    "structuredContent":{
+		      "provider":"codex",
+		      "state":"connecting",
+		      "type":"chatgptDeviceCode",
+		      "loginId":"login-1",
+		      "verificationUrl":"https://auth.openai.example/device",
+		      "userCode":"ABCD-EFGH"
+		    }
+		  }
+		}`))
+	}))
+	defer mcp.Close()
+
+	srv := &apiServer{
+		mcpURL: mcp.URL,
+		token:  "secret-token",
+		client: http.DefaultClient,
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/providers/action",
+		strings.NewReader(`{"action":"connect","provider":"codex"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleProviderAction(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"userCode":"ABCD-EFGH"`) {
+		t.Fatalf("device login missing: %s", rec.Body.String())
+	}
+}
+
+func TestAPIProviderActionRejectsUnknownAction(t *testing.T) {
+	srv := &apiServer{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/providers/action",
+		strings.NewReader(`{"action":"steal-cookies","provider":"codex"}`),
+	)
+	srv.handleProviderAction(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", rec.Code)
+	}
+}
