@@ -45,3 +45,6 @@ jobs:
 
       - name: Build admin dashboard Docker image
         run: docker build --file Dockerfile.sentryadmin --tag matrix-sentry-admin:test .
+
+      - name: Build provider daemon Docker image
+        run: docker build --file Dockerfile.sentryproviderd --tag matrix-sentry-providerd:test .
