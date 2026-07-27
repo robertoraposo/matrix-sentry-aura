@@ -60,7 +60,7 @@ func TestCodexAppServerHelperProcess(t *testing.T) {
 			_ = json.Unmarshal(request.Params, &params)
 			if !params.Ephemeral ||
 				params.ApprovalPolicy != "never" ||
-				params.Sandbox != "readOnly" {
+				params.Sandbox != "read-only" {
 				_ = encoder.Encode(map[string]any{
 					"id": id,
 					"error": map[string]any{
