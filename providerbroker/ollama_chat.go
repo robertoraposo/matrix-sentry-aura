@@ -10,12 +10,16 @@ import (
 	"strings"
 )
 
-const maxOllamaResponseBytes = 4 << 20
+const (
+	maxOllamaResponseBytes = 4 << 20
+	defaultOllamaMaxTokens = 256
+)
 
 type ChatRequest struct {
-	Model  string
-	System string
-	Prompt string
+	Model     string
+	System    string
+	Prompt    string
+	MaxTokens int
 }
 
 type ChatResult struct {
@@ -43,6 +47,11 @@ func InvokeOllama(
 	input.Model = strings.TrimSpace(input.Model)
 	input.System = strings.TrimSpace(input.System)
 	input.Prompt = strings.TrimSpace(input.Prompt)
+
+	maxTokens := input.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultOllamaMaxTokens
+	}
 
 	if baseURL == "" {
 		return ChatResult{}, fmt.Errorf("providerbroker: Ollama URL is required")
@@ -75,14 +84,22 @@ func InvokeOllama(
 		Content: input.Prompt,
 	})
 
+	type options struct {
+		NumPredict int `json:"num_predict"`
+	}
+
 	payload := struct {
 		Model    string    `json:"model"`
 		Messages []message `json:"messages"`
 		Stream   bool      `json:"stream"`
+		Options  options   `json:"options"`
 	}{
 		Model:    input.Model,
 		Messages: messages,
 		Stream:   false,
+		Options: options{
+			NumPredict: maxTokens,
+		},
 	}
 
 	body, err := json.Marshal(payload)
