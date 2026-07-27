@@ -23,8 +23,11 @@ func TestInvokeOllamaChat(t *testing.T) {
 		}
 
 		var got struct {
-			Model    string `json:"model"`
-			Stream   bool   `json:"stream"`
+			Model   string `json:"model"`
+			Stream  bool   `json:"stream"`
+			Options struct {
+				NumPredict int `json:"num_predict"`
+			} `json:"options"`
 			Messages []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
@@ -39,6 +42,12 @@ func TestInvokeOllamaChat(t *testing.T) {
 		}
 		if got.Stream {
 			t.Fatal("stream must be false")
+		}
+		if got.Options.NumPredict != 64 {
+			t.Fatalf(
+				"num_predict = %d, want 64",
+				got.Options.NumPredict,
+			)
 		}
 		if len(got.Messages) != 2 {
 			t.Fatalf("messages = %#v", got.Messages)
@@ -73,9 +82,10 @@ func TestInvokeOllamaChat(t *testing.T) {
 		srv.Client(),
 		srv.URL+"/",
 		ChatRequest{
-			Model:  "qwen3:8b",
-			System: "Responde brevemente.",
-			Prompt: "Di hola.",
+			Model:     "qwen3:8b",
+			System:    "Responde brevemente.",
+			Prompt:    "Di hola.",
+			MaxTokens: 64,
 		},
 	)
 	if err != nil {

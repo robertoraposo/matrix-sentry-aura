@@ -56,9 +56,10 @@ func (s *server) handleProviderInvoke(
 			s.ollamaClient,
 			s.ollamaURL,
 			providerbroker.ChatRequest{
-				Model:  model,
-				System: system,
-				Prompt: prompt,
+				Model:     model,
+				System:    system,
+				Prompt:    prompt,
+				MaxTokens: s.ollamaMaxTokens,
 			},
 		)
 		if err != nil {
